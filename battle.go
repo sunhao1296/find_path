@@ -33,16 +33,3 @@ func initDamageCache() {
 func getDamage(playerATK, playerDEF int8, monsterID int) int16 {
 	return damageCache[playerATK][playerDEF][monsterID]
 }
-
-// 新增：战后状态更新函数
-func updateStateAfterBattle(state *State, monster *Monster) *State {
-	newState := state
-	// 怪物id为81的是黄门， 黄钥匙-1
-	if monster.ID == 81 {
-		newState.YellowKeys--
-	}
-	// 获得奖励
-	newState.Money += monster.Money
-
-	return newState
-}
