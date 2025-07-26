@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -20,12 +21,18 @@ type Neighbor struct {
 	MonsterPos [2]int
 }
 
+type BreakPoint struct {
+	Pos     [2]int
+	AreaIDs []int // 该破点能连接的区域ID
+}
+
 type Graph struct {
 	Areas              []*Area
 	StartArea          int
 	EndArea            int
 	AreaMap            [][]int
 	MonsterConnections map[string]*MonsterConnection // key为"x,y"格式的怪物位置
+	BreakPoints        []*BreakPoint                 // 新增：破墙点
 }
 
 // 地图转图转换器
@@ -64,15 +71,9 @@ func (c *MapToGraphConverter) isValidPosition(pos [2]int) bool {
 	return x >= 0 && x < c.rows && y >= 0 && y < c.cols && c.gameMap[x][y] != 1
 }
 
-// 处理怪物位置，将怪物本身作为单点区域并检查连通性
+// 处理怪物位置，检查其连通性并处理相邻的未访问区域
 func (c *MapToGraphConverter) processMonsterPosition(x, y int, visited [][]int, areaCount *int, startArea, endArea *int) {
 	connectedAreas := make(map[int]bool)
-
-	// 创建怪物自身的单点区域
-	monsterAreaID := *areaCount
-	c.processCellAsNewArea(x, y, monsterAreaID, visited, startArea, endArea)
-	connectedAreas[monsterAreaID] = true
-	*areaCount++
 
 	// 检查怪物四周的连通性
 	for _, dir := range c.directions {
@@ -201,57 +202,6 @@ func (c *MapToGraphConverter) buildMonsterConnections(visited [][]int) map[strin
 	return monsterConnections
 }
 
-// 验证转换结果
-func (c *MapToGraphConverter) validateConversion() {
-	totalTreasuresInMap := 0
-	for i := 0; i < c.rows; i++ {
-		for j := 0; j < c.cols; j++ {
-			if _, exists := c.treasureMap[c.gameMap[i][j]]; exists {
-				totalTreasuresInMap++
-			}
-		}
-	}
-
-	totalTreasuresInAreas := 0
-	for _, area := range c.areas {
-		totalTreasuresInAreas += len(area.Treasures)
-	}
-
-	fmt.Printf("地图中宝物总数: %d\n", totalTreasuresInMap)
-	fmt.Printf("区域中宝物总数: %d\n", totalTreasuresInAreas)
-	fmt.Printf("总区域数: %d\n", len(c.areas))
-	fmt.Printf("怪物连接数: %d\n", len(c.monsterConnections))
-
-	if totalTreasuresInMap != totalTreasuresInAreas {
-		fmt.Printf("警告：有 %d 个宝物丢失！\n", totalTreasuresInMap-totalTreasuresInAreas)
-
-		// 打印丢失宝物的位置
-		for i := 0; i < c.rows; i++ {
-			for j := 0; j < c.cols; j++ {
-				if _, exists := c.treasureMap[c.gameMap[i][j]]; exists {
-					found := false
-					for _, area := range c.areas {
-						for _, pos := range area.Positions {
-							if pos[0] == i && pos[1] == j {
-								found = true
-								break
-							}
-						}
-						if found {
-							break
-						}
-					}
-					if !found {
-						fmt.Printf("丢失的宝物位置: (%d,%d), 值=%d\n", i, j, c.gameMap[i][j])
-					}
-				}
-			}
-		}
-	} else {
-		fmt.Println("✓ 所有宝物都已正确分配到区域")
-	}
-}
-
 // 转换地图为图 - 修复版
 func (c *MapToGraphConverter) Convert() *Graph {
 	visited := make([][]int, c.rows)
@@ -293,6 +243,46 @@ func (c *MapToGraphConverter) Convert() *Graph {
 	// 第二遍：构建最终的怪物连接信息
 	monsterConnections := c.buildMonsterConnections(visited)
 
+	// 新增：收集破墙点
+	breakPointMap := make(map[string]*BreakPoint)
+	for i := 0; i < c.rows; i++ {
+		for j := 0; j < c.cols; j++ {
+			if c.gameMap[i][j] != 1 {
+				continue // 只考虑墙
+			}
+			neighborAreas := map[int]bool{}
+			for _, dir := range c.directions {
+				nx, ny := i+dir[0], j+dir[1]
+				if nx < 0 || nx >= c.rows || ny < 0 || ny >= c.cols {
+					continue
+				}
+				aid := visited[nx][ny]
+				if aid != -1 {
+					neighborAreas[aid] = true
+				}
+			}
+			if len(neighborAreas) >= 2 {
+				// 生成区域组合key用于去重
+				areaList := []int{}
+				for aid := range neighborAreas {
+					areaList = append(areaList, aid)
+				}
+				sort.Ints(areaList)
+				key := fmt.Sprintf("%v", areaList)
+				if _, exists := breakPointMap[key]; !exists {
+					breakPointMap[key] = &BreakPoint{
+						Pos:     [2]int{i, j},
+						AreaIDs: areaList,
+					}
+				}
+			}
+		}
+	}
+	breakPoints := []*BreakPoint{}
+	for _, bp := range breakPointMap {
+		breakPoints = append(breakPoints, bp)
+	}
+
 	// 验证转换结果
 	c.validateConversion()
 
@@ -302,5 +292,31 @@ func (c *MapToGraphConverter) Convert() *Graph {
 		EndArea:            endArea,
 		AreaMap:            visited,
 		MonsterConnections: monsterConnections,
+		BreakPoints:        breakPoints, // 新增
+	}
+}
+
+// 验证转换结果
+func (c *MapToGraphConverter) validateConversion() {
+	totalTreasuresInMap := 0
+	for i := 0; i < c.rows; i++ {
+		for j := 0; j < c.cols; j++ {
+			if _, exists := c.treasureMap[c.gameMap[i][j]]; exists {
+				totalTreasuresInMap++
+			}
+		}
+	}
+
+	totalTreasuresInAreas := 0
+	for _, area := range c.areas {
+		totalTreasuresInAreas += len(area.Treasures)
+	}
+
+	fmt.Printf("地图中宝物总数: %d\n", totalTreasuresInMap)
+	fmt.Printf("总区域数: %d\n", len(c.areas))
+	fmt.Printf("怪物连接数: %d\n", len(c.monsterConnections))
+
+	if totalTreasuresInMap != totalTreasuresInAreas {
+		fmt.Printf("警告：有 %d 个宝物丢失！\n", totalTreasuresInMap-totalTreasuresInAreas)
 	}
 }

@@ -6,15 +6,19 @@ import (
 )
 
 type State struct {
-	HP                 int16    // 2字节
-	ATK                int8     // 1字节
-	DEF                int8     // 1字节
-	YellowKeys         int8     // 1字节
-	BlueKeys           int8     // 1字节 - 新增蓝钥匙
+	HP         int16 // 2字节
+	ATK        int8  // 1字节
+	DEF        int8  // 1字节
+	YellowKeys int8  // 1字节
+	BlueKeys   int8  // 1字节 - 新增蓝钥匙
+	// 剪枝相关字段
+	ConsecutiveFights int8 // 连续战斗次数（未提升攻防时）
+	FightsSinceStart  int8 // 从开始到现在的战斗次数
+
+	Action             [2]int16 // 新增：当前动作 [damage, pos编码]
 	DefeatedMonsters   int64    // 8字节
 	CollectedTreasures int64    // 8字节
 	PrevKey            int64    // 新增：前驱状态的key
-	Action             [2]int16 // 新增：当前动作 [damage, pos编码]
 }
 
 type SearchResult struct {
@@ -28,53 +32,13 @@ type SearchResult struct {
 	CollectedCount int
 }
 
-// 怪物ID常量
-const (
-	YellowDoorID = 81 // 黄门
-	BlueDoorID   = 82 // 蓝门
-)
-
-type PriorityQueue []*StateNode
-
-type StateNode struct {
-	Key   int64
-	HP    int16
-	Index int
-}
-
-func (pq PriorityQueue) Len() int           { return len(pq) }
-func (pq PriorityQueue) Less(i, j int) bool { return pq[i].HP > pq[j].HP } // 最大堆
-func (pq PriorityQueue) Swap(i, j int)      { pq[i], pq[j] = pq[j], pq[i]; pq[i].Index, pq[j].Index = i, j }
-
-func (pq *PriorityQueue) Push(x interface{}) {
-	n := len(*pq)
-	item := x.(*StateNode)
-	item.Index = n
-	*pq = append(*pq, item)
-}
-
-func (pq *PriorityQueue) Pop() interface{} {
-	old := *pq
-	n := len(old)
-	item := old[n-1]
-	old[n-1] = nil
-	item.Index = -1
-	*pq = old[0 : n-1]
-	return item
-}
-
-// 输出路径函数（回溯 reconstruct）
-func printPath(path []int16) {
-	fmt.Printf("\n路径步骤:\n")
-	if len(path) == 0 {
-		fmt.Println("无战斗记录")
-		return
-	}
-	for i := 0; i < len(path); i += 2 {
-		damage := path[i]
-		pos := path[i+1]
-		fmt.Printf("%d. 战斗损失%d血, 战斗at %d, %d\n", i/2+1, damage, pos>>8, pos%(1<<8))
-	}
+type HeroItem struct {
+	AreaID     int
+	HP         int16
+	ATK        int8
+	DEF        int8
+	YellowKeys int8
+	BlueKeys   int8
 }
 
 // reconstructPath: 回溯生成完整路径
@@ -82,7 +46,7 @@ func reconstructPath(dp map[int64]*State, endKey int64) []int16 {
 	path := []int16{}
 	for key := endKey; key != 0; {
 		state := dp[key]
-		if state == nil || (state.Action[0] == 0 && state.Action[1] == 0 && state.PrevKey == 0) {
+		if state == nil || (state.PrevKey == 0 && (state.Action[0] == 0 && state.Action[1] == 0)) {
 			break
 		}
 		path = append([]int16{state.Action[0], state.Action[1]}, path...)
@@ -91,235 +55,12 @@ func reconstructPath(dp map[int64]*State, endKey int64) []int16 {
 	return path
 }
 
-// 展示状态编码示例（调试用）
-func showStateEncoding(defeatedMonsters int64, yellowKeys, blueKeys int8) {
-	encoded := (int64(blueKeys) << 62) | (int64(yellowKeys) << 59) | defeatedMonsters
-	fmt.Printf("怪物状态: %059b\n", defeatedMonsters)
-	fmt.Printf("黄钥匙数: %d (二进制: %03b)\n", yellowKeys, yellowKeys)
-	fmt.Printf("蓝钥匙数: %d (二进制: %02b)\n", blueKeys, blueKeys)
-	fmt.Printf("编码结果: %064b\n", encoded)
-	fmt.Printf("编码为int64: %d\n", encoded)
-}
-
-// 位操作函数
-func setBit(mask int64, index int) int64 {
-	return mask | (1 << index)
-}
-
-func hasBit(mask int64, index int) bool {
-	return (mask & (1 << index)) != 0
-}
-
-func countBits(mask int64) int {
-	count := 0
-	for mask != 0 {
-		count++
-		mask &= mask - 1 // 清除最低位的1
-	}
-	return count
-}
-
-// 将位掩码转换为map（用于兼容现有逻辑）
-func bitmaskToMap(mask int64, size int) map[int]bool {
-	result := make(map[int]bool)
-	for i := 0; i < size; i++ {
-		if hasBit(mask, i) {
-			result[i] = true
-		}
-	}
-	return result
-}
-
-// 预计算的映射关系
-type AccessibilityCache struct {
-	// 怪物ID -> 连接的区域列表
-	monsterToAreas map[int][]int
-	// 区域ID -> 连接到该区域的怪物列表
-	areaToMonsters map[int][]int
-	// 缓存结果: defeatedMonsters位掩码 -> 可达区域map
-	cache map[int64]map[int]bool
-	// 缓存LRU，防止内存无限增长
-	cacheOrder   []int64
-	maxCacheSize int
-}
-
-// 初始化缓存
-func NewAccessibilityCache(allMonsters []*GlobalMonster, maxCacheSize int) *AccessibilityCache {
-	cache := &AccessibilityCache{
-		monsterToAreas: make(map[int][]int),
-		areaToMonsters: make(map[int][]int),
-		cache:          make(map[int64]map[int]bool),
-		cacheOrder:     make([]int64, 0),
-		maxCacheSize:   maxCacheSize,
-	}
-
-	// 预计算怪物-区域映射关系
-	for monsterIdx, monster := range allMonsters {
-		cache.monsterToAreas[monsterIdx] = monster.ConnectedAreas
-
-		for _, areaID := range monster.ConnectedAreas {
-			cache.areaToMonsters[areaID] = append(cache.areaToMonsters[areaID], monsterIdx)
-		}
-	}
-
-	return cache
-}
-
-// 清理LRU缓存
-func (ac *AccessibilityCache) evictOldEntries() {
-	if len(ac.cache) <= ac.maxCacheSize {
-		return
-	}
-
-	// 删除最旧的条目
-	toRemove := len(ac.cache) - ac.maxCacheSize + 1
-	for i := 0; i < toRemove && len(ac.cacheOrder) > 0; i++ {
-		oldKey := ac.cacheOrder[0]
-		delete(ac.cache, oldKey)
-		ac.cacheOrder = ac.cacheOrder[1:]
-	}
-}
-
-// 获取可达区域（带缓存）
-func (ac *AccessibilityCache) GetAccessibleAreas(defeatedMonsters int64, startArea int) map[int]bool {
-	// 检查缓存
-	if cached, exists := ac.cache[defeatedMonsters]; exists {
-		// 移动到LRU队列末尾
-		for i, key := range ac.cacheOrder {
-			if key == defeatedMonsters {
-				ac.cacheOrder = append(ac.cacheOrder[:i], ac.cacheOrder[i+1:]...)
-				break
-			}
-		}
-		ac.cacheOrder = append(ac.cacheOrder, defeatedMonsters)
-		return cached
-	}
-
-	// 计算可达区域
-	accessible := ac.calculateAccessibleAreas(defeatedMonsters, startArea)
-
-	// 存入缓存
-	ac.cache[defeatedMonsters] = accessible
-	ac.cacheOrder = append(ac.cacheOrder, defeatedMonsters)
-	ac.evictOldEntries()
-
-	return accessible
-}
-
-// 实际计算可达区域（优化版）
-func (ac *AccessibilityCache) calculateAccessibleAreas(defeatedMonsters int64, startArea int) map[int]bool {
-	accessible := make(map[int]bool)
-	accessible[startArea] = true
-	queue := []int{startArea}
-
-	for len(queue) > 0 {
-		currentArea := queue[0]
-		queue = queue[1:]
-
-		// 检查从当前区域能通过哪些已击败的怪物到达新区域
-		if monsters, exists := ac.areaToMonsters[currentArea]; exists {
-			for _, monsterIdx := range monsters {
-				if hasBit(defeatedMonsters, monsterIdx) { // 怪物已被击败
-					// 该怪物连接的所有区域和怪物自身区域都变为可访问
-					// 添加怪物自身区域作为可达区域
-					monsterAreaID := monsterIdx + len(ac.areaToMonsters)
-					accessible[monsterAreaID] = true
-					queue = append(queue, monsterAreaID)
-					for _, connectedAreaID := range ac.monsterToAreas[monsterIdx] {
-						if !accessible[connectedAreaID] {
-							accessible[connectedAreaID] = true
-							queue = append(queue, connectedAreaID)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return accessible
-}
-
-// 增量更新可达区域（当击败新怪物时）
-func (ac *AccessibilityCache) GetAccessibleAreasIncremental(
-	baseDefeatedMonsters int64,
-	newlyDefeatedMonster int,
-	startArea int,
-	baseAccessible map[int]bool) map[int]bool {
-
-	newDefeatedMonsters := setBit(baseDefeatedMonsters, newlyDefeatedMonster)
-
-	// 检查缓存
-	if cached, exists := ac.cache[newDefeatedMonsters]; exists {
-		return cached
-	}
-
-	// 增量计算：基于已有的可达区域，只处理新击败怪物的影响
-	newAccessible := make(map[int]bool)
-	for area, reachable := range baseAccessible {
-		newAccessible[area] = reachable
-	}
-
-	// 检查新击败的怪物能带来哪些新的可达区域
-	queue := []int{}
-
-	// 检查新击败怪物连接的区域
-	if areas, exists := ac.monsterToAreas[newlyDefeatedMonster]; exists {
-		for _, areaID := range areas {
-			if newAccessible[areaID] {
-				// 如果怪物连接的区域已经可达，则怪物连接的所有区域和怪物自身区域都变为可达
-				// 添加怪物自身区域作为可达区域
-				monsterAreaID := newlyDefeatedMonster + len(ac.areaToMonsters)
-				newAccessible[monsterAreaID] = true
-				queue = append(queue, monsterAreaID)
-				for _, connectedAreaID := range areas {
-					if !newAccessible[connectedAreaID] {
-						newAccessible[connectedAreaID] = true
-						queue = append(queue, connectedAreaID)
-					}
-				}
-				break
-			}
-		}
-	}
-
-	// 从新可达的区域继续扩展
-	for len(queue) > 0 {
-		currentArea := queue[0]
-		queue = queue[1:]
-
-		if monsters, exists := ac.areaToMonsters[currentArea]; exists {
-			for _, monsterIdx := range monsters {
-				if hasBit(newDefeatedMonsters, monsterIdx) {
-					// 添加怪物自身区域作为可达区域
-					monsterAreaID := monsterIdx + len(ac.areaToMonsters)
-					newAccessible[monsterAreaID] = true
-					queue = append(queue, monsterAreaID)
-					for _, connectedAreaID := range ac.monsterToAreas[monsterIdx] {
-						if !newAccessible[connectedAreaID] {
-							newAccessible[connectedAreaID] = true
-							queue = append(queue, connectedAreaID)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// 存入缓存
-	ac.cache[newDefeatedMonsters] = newAccessible
-	ac.cacheOrder = append(ac.cacheOrder, newDefeatedMonsters)
-	ac.evictOldEntries()
-
-	return newAccessible
-}
-
-type HeroItem struct {
-	AreaID     int
-	HP         int16
-	ATK        int8
-	DEF        int8
-	YellowKeys int8
-	BlueKeys   int8
+// 计算非零伤害的连续战斗次数
+func countNonZeroDamageFights(state *State, allMonsters []*GlobalMonster) int8 {
+	// 这里需要回溯路径来统计，简化实现：如果连续战斗中大部分是零伤害，则调整计数
+	// 实际实现中可以在State中添加专门的NonZeroDamageFights字段来精确追踪
+	nonZeroRatio := 0.7 // 假设70%的战斗是有伤害的
+	return int8(float64(state.ConsecutiveFights) * nonZeroRatio)
 }
 
 // 优化后的主函数
@@ -407,15 +148,16 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 	// 状态编码（修改支持蓝钥匙）
 	// 位分配：低59位为怪物状态，第59-61位为黄钥匙(3位，支持0-7)，第62-63位为蓝钥匙(2位，支持0-3)
 	encodeState := func(defeatedMonsters int64, yellowKeys, blueKeys int8) int64 {
-		if yellowKeys > 7 {
-			yellowKeys = 7
+		if yellowKeys > maxYellowKey {
 			_ = fmt.Errorf("黄钥匙数量超过最大限制，已调整为7")
 		}
-		if blueKeys > 3 {
-			blueKeys = 3
+		if blueKeys > maxBlueKey {
 			_ = fmt.Errorf("蓝钥匙数量超过最大限制，已调整为3")
 		}
-		return (int64(blueKeys) << 62) | (int64(yellowKeys) << 59) | defeatedMonsters
+		if defeatedMonsters > (1<<yellowKeyBit)-1 {
+			_ = fmt.Errorf("已击杀怪物数量超过最大限制")
+		}
+		return (int64(blueKeys) << blueKeyBit) | (int64(yellowKeys) << yellowKeyBit) | defeatedMonsters
 	}
 
 	// DP表
@@ -445,6 +187,8 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 		CollectedTreasures: newInitialCollected,
 		PrevKey:            0,
 		Action:             [2]int16{0, 0},
+		ConsecutiveFights:  0,
+		FightsSinceStart:   0,
 	}
 
 	// BFS搜索（分阶段：第一阶段只扩展状态，第二阶段统一选最优解）
@@ -454,8 +198,7 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 
 	var candidateKeys []int64 // 阶段一收集所有满足终点条件的状态key
 	var iterations int64
-	var maxIterations int64
-	maxIterations = 1 << 50
+	var prunedCount int64 // 统计剪枝次数
 
 	for len(queue) > 0 && iterations < maxIterations {
 		iterations++
@@ -469,6 +212,12 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 
 		// 使用缓存获取可达区域
 		accessibleAreas := accessCache.GetAccessibleAreas(state.DefeatedMonsters, startArea)
+
+		// 剪枝检查
+		if shouldPrune(state, requiredATK, requiredDEF, allMonsters, accessibleAreas) {
+			prunedCount++
+			continue
+		}
 
 		// 阶段一：只收集满足终点条件的状态，不直接更新最优解
 		if accessibleAreas[endArea] && state.ATK >= requiredATK && state.DEF >= requiredDEF &&
@@ -533,6 +282,16 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 				finalCollected = setBit(finalCollected, idx)
 			}
 
+			// 计算新的剪枝状态
+			oldAtkDef := state.ATK + state.DEF
+			newAtkDef := finalATK + finalDEF
+			newConsecutiveFights := state.ConsecutiveFights
+			if newAtkDef > oldAtkDef {
+				newConsecutiveFights = 0 // 攻防提升，重置连续计数
+			} else {
+				newConsecutiveFights++ // 没有提升，增加连续计数
+			}
+
 			newStateKey := encodeState(newDefeated, finalYK, finalBK)
 
 			existingState, exists := dp[newStateKey]
@@ -547,6 +306,8 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 					CollectedTreasures: finalCollected,
 					PrevKey:            stateKey,
 					Action:             [2]int16{int16(damage), int16(monster.Pos[0]<<8 + monster.Pos[1])},
+					ConsecutiveFights:  newConsecutiveFights,
+					FightsSinceStart:   state.FightsSinceStart + 1,
 				}
 
 				if !visited[newStateKey] {
@@ -584,14 +345,9 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 	}
 	if bestResult != nil {
 		bestResult.Path = reconstructPath(dp, bestKey)
-		fmt.Printf("\n=== 找到最优解 ===\n")
-		fmt.Printf("最终属性: HP=%d, ATK=%d, DEF=%d, 黄钥匙=%d, 蓝钥匙=%d\n",
-			bestResult.HP, bestResult.ATK, bestResult.DEF, bestResult.YellowKeys, bestResult.BlueKeys)
-		fmt.Printf("缓存命中统计: 总计算次数约 %d\n", iterations)
-		printPath(bestResult.Path)
 		return *bestResult
 	} else {
-		fmt.Printf("\n=== 找不到最优解 ===\n")
+		// 修复：找不到最优解时，不回溯路径，直接返回空路径
 		return SearchResult{
 			HP:   -1,
 			Path: []int16{},

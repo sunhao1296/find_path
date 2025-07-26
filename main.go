@@ -59,20 +59,49 @@ func main() {
 		}
 	}
 	graph := converter.Convert()
-	findOptimalPath(graph, &HeroItem{
-		HP:         280,
-		ATK:        8,
-		DEF:        8,
-		AreaID:     graph.StartArea,
-		YellowKeys: 0,
-		BlueKeys:   0,
-	}, &HeroItem{
-		ATK:        15,
-		DEF:        15,
-		AreaID:     graph.EndArea,
-		YellowKeys: 0,
-		BlueKeys:   0,
-	})
+	for _, point := range graph.BreakPoints {
+		fmt.Printf("BreakPoint at %v, AreaIDs: %v\n", point.Pos, point.AreaIDs)
+	}
+	maxHP := int16(0)
+	var maxResult SearchResult
+	var bestPoint [2]int
+	for _, point := range graph.BreakPoints {
+		x := point.Pos[0]
+		y := point.Pos[1]
+		gameMap[x][y] = 0
+		newConvertor := NewMapToGraphConverter(gameMap, treasureMap, monsterMap, start, end)
+		newGraph := newConvertor.Convert()
+		result := findOptimalPath(newGraph, &HeroItem{
+			HP:         initialHP,
+			ATK:        initialAtk,
+			DEF:        initialDef,
+			AreaID:     graph.StartArea,
+			YellowKeys: initialYK,
+			BlueKeys:   initialBK,
+		}, &HeroItem{
+			ATK:        requiredATK,
+			DEF:        requiredDEF,
+			AreaID:     graph.EndArea,
+			YellowKeys: requiredYellowKeys,
+			BlueKeys:   requiredBlueKeys,
+		})
+		if result.HP > maxHP {
+			maxHP = result.HP
+			maxResult = result
+			bestPoint = point.Pos
+		}
+		gameMap[x][y] = 1
+	}
+	if maxHP > 0 {
+		fmt.Printf("\n=== 找到最优解 ===\n")
+		fmt.Printf("最终属性: HP=%d", maxResult.HP)
+		fmt.Printf("破点：%v", bestPoint)
+		printPath(maxResult.Path)
+	} else {
+		fmt.Printf("\n=== 找不到最优解 ===\n")
+	}
+	//graph.Print()
+
 	endTime := time.Now()
 	fmt.Printf("Execution time: %v seconds\n", endTime.Sub(startTime).Seconds())
 	printStats()
