@@ -41,7 +41,7 @@ var (
 	end        = [2]int{0, 6}
 	initialAtk = int8(9)    // 初始攻击力
 	initialDef = int8(5)    // 初始防御力
-	initialHP  = int16(160) // 初始生命值
+	initialHP  = int16(280) // 初始生命值
 	initialYK  = int8(2)    // 初始黄钥匙
 	initialBK  = int8(1)    // 初始蓝钥匙
 

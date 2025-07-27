@@ -32,6 +32,20 @@ type SearchResult struct {
 	CollectedCount int
 }
 
+// 输出路径函数（回溯 reconstruct）
+func printPath(path []int16) {
+	fmt.Printf("\n路径步骤:\n")
+	if len(path) == 0 {
+		fmt.Println("无战斗记录")
+		return
+	}
+	for i := 0; i < len(path); i += 2 {
+		damage := path[i]
+		pos := path[i+1]
+		fmt.Printf("%d. 战斗损失%d血, 战斗at %d, %d\n", i/2+1, damage, pos>>8, pos%(1<<8))
+	}
+}
+
 type HeroItem struct {
 	AreaID     int
 	HP         int16
@@ -53,14 +67,6 @@ func reconstructPath(dp map[int64]*State, endKey int64) []int16 {
 		key = state.PrevKey
 	}
 	return path
-}
-
-// 计算非零伤害的连续战斗次数
-func countNonZeroDamageFights(state *State, allMonsters []*GlobalMonster) int8 {
-	// 这里需要回溯路径来统计，简化实现：如果连续战斗中大部分是零伤害，则调整计数
-	// 实际实现中可以在State中添加专门的NonZeroDamageFights字段来精确追踪
-	nonZeroRatio := 0.7 // 假设70%的战斗是有伤害的
-	return int8(float64(state.ConsecutiveFights) * nonZeroRatio)
 }
 
 // 优化后的主函数

@@ -26,13 +26,32 @@ type BreakPoint struct {
 	AreaIDs []int // 该破点能连接的区域ID
 }
 
+// 中心飞目标信息
+type CenterFlyTarget struct {
+	TargetPos  [2]int // 中心对称点坐标
+	TargetArea int    // 目标点所属区域ID
+	IsValid    bool   // 目标点是否为有效空地
+}
+
+// 中心飞查询结果
+type CenterFlyResult struct {
+	FromArea    int                      // 起始区域
+	Targets     []*CenterFlyTarget       // 所有可达目标
+	TargetAreas map[int]*CenterFlyTarget // 按目标区域ID索引的快速查询
+}
+
+// Graph 结构添加中心飞相关字段
 type Graph struct {
 	Areas              []*Area
 	StartArea          int
 	EndArea            int
 	AreaMap            [][]int
-	MonsterConnections map[string]*MonsterConnection // key为"x,y"格式的怪物位置
-	BreakPoints        []*BreakPoint                 // 新增：破墙点
+	MonsterConnections map[string]*MonsterConnection
+	BreakPoints        []*BreakPoint
+
+	// 新增：中心飞相关
+	centerPos      [2]int                   // 地图中心坐标
+	centerFlyCache map[int]*CenterFlyResult // 按区域ID缓存的中心飞查询结果
 }
 
 // 地图转图转换器
@@ -63,6 +82,29 @@ func NewMapToGraphConverter(gameMap [][]int, treasureMap map[int]*Treasure, mons
 		areas:              []*Area{},
 		monsterConnections: make(map[string]map[int]bool),
 	}
+}
+
+// 计算给定位置的中心对称点
+func (g *Graph) getCenterSymmetricPos(pos [2]int) [2]int {
+	return [2]int{
+		2*g.centerPos[0] - pos[0],
+		2*g.centerPos[1] - pos[1],
+	}
+}
+
+// 检查位置是否在地图范围内且为空地
+func (g *Graph) isValidLandingPos(pos [2]int, gameMap [][]int) bool {
+	x, y := pos[0], pos[1]
+	rows, cols := len(gameMap), len(gameMap[0])
+
+	// 检查边界
+	if x < 0 || x >= rows || y < 0 || y >= cols {
+		return false
+	}
+
+	// 检查是否为空地（非墙且非怪物）
+	cellValue := gameMap[x][y]
+	return cellValue != 1 // 1代表墙
 }
 
 // 检查位置是否有效
@@ -202,7 +244,115 @@ func (c *MapToGraphConverter) buildMonsterConnections(visited [][]int) map[strin
 	return monsterConnections
 }
 
-// 转换地图为图 - 修复版
+// 构建中心飞查询缓存
+func (g *Graph) buildCenterFlyCache(gameMap [][]int) {
+	g.centerFlyCache = make(map[int]*CenterFlyResult)
+
+	// 计算地图中心
+	rows, cols := len(gameMap), len(gameMap[0])
+	g.centerPos = [2]int{rows / 2, cols / 2}
+
+	// 为每个区域构建中心飞目标
+	for _, area := range g.Areas {
+		result := &CenterFlyResult{
+			FromArea:    area.ID,
+			Targets:     []*CenterFlyTarget{},
+			TargetAreas: make(map[int]*CenterFlyTarget),
+		}
+
+		// 检查该区域所有位置的中心对称点
+		targetAreaSet := make(map[int]bool)
+
+		for _, pos := range area.Positions {
+			symmetricPos := g.getCenterSymmetricPos(pos)
+
+			if g.isValidLandingPos(symmetricPos, gameMap) {
+				// 查找目标位置属于哪个区域
+				targetAreaID := g.AreaMap[symmetricPos[0]][symmetricPos[1]]
+
+				if targetAreaID != -1 && !targetAreaSet[targetAreaID] {
+					targetAreaSet[targetAreaID] = true
+
+					target := &CenterFlyTarget{
+						TargetPos:  symmetricPos,
+						TargetArea: targetAreaID,
+						IsValid:    true,
+					}
+
+					result.Targets = append(result.Targets, target)
+					result.TargetAreas[targetAreaID] = target
+				}
+			}
+		}
+
+		g.centerFlyCache[area.ID] = result
+	}
+}
+
+// 查询从指定区域出发的所有中心飞目标
+func (g *Graph) GetCenterFlyTargets(fromAreaID int) *CenterFlyResult {
+	if result, exists := g.centerFlyCache[fromAreaID]; exists {
+		return result
+	}
+	return &CenterFlyResult{
+		FromArea:    fromAreaID,
+		Targets:     []*CenterFlyTarget{},
+		TargetAreas: make(map[int]*CenterFlyTarget),
+	}
+}
+
+// 检查是否可以从一个区域中心飞到另一个区域
+func (g *Graph) CanCenterFlyTo(fromAreaID, toAreaID int) bool {
+	result := g.GetCenterFlyTargets(fromAreaID)
+	_, canFly := result.TargetAreas[toAreaID]
+	return canFly
+}
+
+// 获取从指定区域可以中心飞到的所有区域ID列表
+func (g *Graph) GetCenterFlyReachableAreas(fromAreaID int) []int {
+	result := g.GetCenterFlyTargets(fromAreaID)
+	areas := make([]int, 0, len(result.Targets))
+
+	for _, target := range result.Targets {
+		areas = append(areas, target.TargetArea)
+	}
+
+	return areas
+}
+
+// 查找能够飞到指定区域的所有源区域
+func (g *Graph) GetCenterFlySourceAreas(toAreaID int) []int {
+	sources := []int{}
+
+	for fromAreaID := range g.centerFlyCache {
+		if g.CanCenterFlyTo(fromAreaID, toAreaID) {
+			sources = append(sources, fromAreaID)
+		}
+	}
+
+	return sources
+}
+
+// 打印中心飞信息（调试用）
+func (g *Graph) PrintCenterFlyInfo() {
+	fmt.Printf("=== 中心飞查询信息 ===\n")
+	fmt.Printf("地图中心: %v\n", g.centerPos)
+
+	for areaID, result := range g.centerFlyCache {
+		if len(result.Targets) > 0 {
+			fmt.Printf("区域 %d 可中心飞到: ", areaID)
+			for i, target := range result.Targets {
+				if i > 0 {
+					fmt.Print(", ")
+				}
+				fmt.Printf("区域%d@%v", target.TargetArea, target.TargetPos)
+			}
+			fmt.Println()
+		}
+	}
+}
+
+// 修改MapToGraphConverter的Convert方法，添加中心飞缓存构建
 func (c *MapToGraphConverter) Convert() *Graph {
 	visited := make([][]int, c.rows)
 	for i := range visited {
@@ -243,7 +393,7 @@ func (c *MapToGraphConverter) Convert() *Graph {
 	// 第二遍：构建最终的怪物连接信息
 	monsterConnections := c.buildMonsterConnections(visited)
 
-	// 新增：收集破墙点
+	// 收集破墙点
 	breakPointMap := make(map[string]*BreakPoint)
 	for i := 0; i < c.rows; i++ {
 		for j := 0; j < c.cols; j++ {
@@ -286,14 +436,43 @@ func (c *MapToGraphConverter) Convert() *Graph {
 	// 验证转换结果
 	c.validateConversion()
 
-	return &Graph{
+	// 创建Graph
+	graph := &Graph{
 		Areas:              c.areas,
 		StartArea:          startArea,
 		EndArea:            endArea,
 		AreaMap:            visited,
 		MonsterConnections: monsterConnections,
-		BreakPoints:        breakPoints, // 新增
+		BreakPoints:        breakPoints,
 	}
+
+	// 构建中心飞缓存
+	graph.buildCenterFlyCache(c.gameMap)
+	ExampleCenterFlyUsage(graph)
+	return graph
+}
+
+// 使用示例
+func ExampleCenterFlyUsage(graph *Graph) {
+	// 查询区域0的所有中心飞目标
+	result := graph.GetCenterFlyTargets(0)
+	fmt.Printf("区域0可以中心飞到%d个目标区域\n", len(result.Targets))
+
+	// 检查是否可以从区域0飞到区域5
+	if graph.CanCenterFlyTo(0, 5) {
+		fmt.Println("可以从区域0中心飞到区域5")
+	}
+
+	// 获取区域0可达的所有区域
+	reachableAreas := graph.GetCenterFlyReachableAreas(0)
+	fmt.Printf("区域0可中心飞到的区域: %v\n", reachableAreas)
+
+	// 查找能飞到区域5的所有源区域
+	sourceAreas := graph.GetCenterFlySourceAreas(5)
+	fmt.Printf("可以中心飞到区域5的源区域: %v\n", sourceAreas)
+
+	// 打印所有中心飞信息
+	graph.PrintCenterFlyInfo()
 }
 
 // 验证转换结果
