@@ -6,6 +6,7 @@ const (
 	maxATK    = int8(20)
 	minDEF    = int8(5)
 	maxDEF    = int8(20)
+	maxMDEF   = int8(20)
 	maxDamage = int16(9999)
 )
 
@@ -16,6 +17,7 @@ const (
 	treasureDEF       = 2
 	treasureYellowKey = 3
 	treasureBlueKey   = 4
+	treasureMDEF      = 5
 
 	maxYellowKey = int8(1<<3 - 1)
 	maxBlueKey   = int8(1<<2 - 1)

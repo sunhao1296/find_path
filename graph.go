@@ -395,6 +395,7 @@ func (c *MapToGraphConverter) Convert() *Graph {
 
 	// 收集破墙点
 	breakPointMap := make(map[string]*BreakPoint)
+
 	for i := 0; i < c.rows; i++ {
 		for j := 0; j < c.cols; j++ {
 			if c.gameMap[i][j] != 1 {
@@ -434,7 +435,7 @@ func (c *MapToGraphConverter) Convert() *Graph {
 	}
 
 	// 验证转换结果
-	c.validateConversion()
+	//c.validateConversion()
 
 	// 创建Graph
 	graph := &Graph{
@@ -448,7 +449,7 @@ func (c *MapToGraphConverter) Convert() *Graph {
 
 	// 构建中心飞缓存
 	graph.buildCenterFlyCache(c.gameMap)
-	ExampleCenterFlyUsage(graph)
+	//ExampleCenterFlyUsage(graph)
 	return graph
 }
 

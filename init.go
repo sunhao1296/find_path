@@ -27,12 +27,12 @@ var (
 	}
 
 	monsterMap = map[int]*Monster{
-		201: {HP: 48, ATK: 18, DEF: 2},
-		202: {HP: 42, ATK: 25, DEF: 1},
-		203: {HP: 57, ATK: 16, DEF: 1},
-		204: {HP: 44, ATK: 30, DEF: 0},
-		205: {HP: 36, ATK: 23, DEF: 4},
-		206: {HP: 31, ATK: 33, DEF: 3},
+		201: {HP: 48, ATK: 18, DEF: 2, Money: 2},
+		202: {HP: 42, ATK: 25, DEF: 1, Money: 3},
+		203: {HP: 57, ATK: 16, DEF: 1, Money: 2},
+		204: {HP: 44, ATK: 30, DEF: 0, Money: 4},
+		205: {HP: 36, ATK: 23, DEF: 4, Money: 3},
+		206: {HP: 31, ATK: 33, DEF: 3, Money: 4},
 		81:  {HP: 1}, // 黄门视作怪物
 		82:  {HP: 1}, // 蓝门视作怪物
 	}
@@ -41,12 +41,12 @@ var (
 	end        = [2]int{0, 6}
 	initialAtk = int8(9)    // 初始攻击力
 	initialDef = int8(5)    // 初始防御力
-	initialHP  = int16(280) // 初始生命值
+	initialHP  = int16(165) // 初始生命值
 	initialYK  = int8(2)    // 初始黄钥匙
 	initialBK  = int8(1)    // 初始蓝钥匙
 
 	requiredATK        = int8(16) // 需要的攻击力
-	requiredDEF        = int8(12) // 需要的防御力
+	requiredDEF        = int8(13) // 需要的防御力
 	requiredYellowKeys = int8(0)
 	requiredBlueKeys   = int8(0)
 

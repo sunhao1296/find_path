@@ -1,0 +1,387 @@
+package main
+
+import (
+	"fmt"
+	"sort"
+)
+
+type State struct {
+	Money             uint8
+	ATK               int8  // 1字节
+	DEF               int8  // 1字节
+	MDEF              uint8 // 1字节 - 新增魔法防御
+	YellowKeys        int8  // 1字节
+	BlueKeys          int8  // 1字节 - 新增蓝钥匙
+	ConsecutiveFights int8  // 连续战斗次数（未提升攻防时）
+	FightsSinceStart  int8  // 从开始到现在的战斗次数
+
+	HP     int16    // 2字节
+	Action [2]int16 // 新增：当前动作 [damage, pos编码]
+	// 剪枝相关字段
+
+	DefeatedMonsters   *ExtendedBitSet // 扩展位图
+	CollectedTreasures *ExtendedBitSet // 扩展位图
+	PrevKey            string          // 改为字符串key以支持更复杂的编码
+}
+
+// encodeStateKey: 新的状态编码函数，支持扩展位图
+func encodeStateKey(defeatedMonsters *ExtendedBitSet, yellowKeys, blueKeys int8, money uint8) string {
+	// 对于小规模情况，仍然使用int64编码以保持性能
+	if defeatedMonsters.size == 1 && len(defeatedMonsters.bits) == 1 {
+		// 兼容原有的int64编码
+		const (
+			yellowKeyBit = 49
+			blueKeyBit   = 52
+			moneyBit     = 54
+			maxYellowKey = 7
+			maxBlueKey   = 3
+			maxMoney     = 63
+		)
+
+		if yellowKeys > maxYellowKey {
+			yellowKeys = maxYellowKey
+		}
+		if blueKeys > maxBlueKey {
+			blueKeys = maxBlueKey
+		}
+		if money > maxMoney {
+			money = maxMoney
+		}
+
+		key := (int64(money) << moneyBit) | (int64(blueKeys) << blueKeyBit) | (int64(yellowKeys) << yellowKeyBit) | int64(defeatedMonsters.bits[0])
+		return fmt.Sprintf("i%d", key)
+	}
+
+	// 对于大规模情况，使用字符串编码
+	return fmt.Sprintf("e%d_%d_%d_%x", yellowKeys, blueKeys, money, defeatedMonsters.Hash())
+}
+
+// 优化后的主函数
+func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResult {
+	// 获取所有怪物和宝物
+	requiredATK, requiredDEF, requiredMDEF, requiredYellowKeys, requiredBlueKeys, endArea := requiredHero.ATK, requiredHero.DEF, requiredHero.MDEF, requiredHero.YellowKeys, requiredHero.BlueKeys, requiredHero.AreaID
+
+	initialHP, initialATK, initialDEF, initialYellowKeys, initialBlueKeys, startArea := startHero.HP, startHero.ATK, startHero.DEF, startHero.YellowKeys, startHero.BlueKeys, startHero.AreaID
+	allMonsters := []*GlobalMonster{}
+	allTreasures := []*GlobalTreasure{}
+
+	for _, area := range graph.Areas {
+		for idx, treasure := range area.Treasures {
+			allTreasures = append(allTreasures, &GlobalTreasure{
+				ID:         fmt.Sprintf("%d-%d", area.ID, idx),
+				AreaID:     area.ID,
+				Type:       treasure.Type,
+				Value:      treasure.Value,
+				OriginalID: treasure.OriginalID,
+			})
+		}
+	}
+
+	for pos, monsterConn := range graph.MonsterConnections {
+		allMonsters = append(allMonsters, &GlobalMonster{
+			Key:            pos,
+			ID:             monsterConn.MonsterID,
+			Monster:        monsterConn.Monster,
+			Pos:            monsterConn.MonsterPos,
+			ConnectedAreas: monsterConn.ConnectedAreas,
+		})
+	}
+
+	// 设置全局计数器
+	globalMonsterCount := len(allMonsters)
+	globalTreasureCount := len(allTreasures)
+
+	// 按位置坐标排序怪物，确保处理顺序一致
+	sort.Slice(allMonsters, func(i, j int) bool {
+		if allMonsters[i].Pos[0] == allMonsters[j].Pos[0] {
+			return allMonsters[i].Pos[1] < allMonsters[j].Pos[1]
+		}
+		return allMonsters[i].Pos[0] < allMonsters[j].Pos[0]
+	})
+
+	// 初始化缓存系统（需要修改以支持ExtendedBitSet）
+	accessCache := NewAccessibilityCacheExt(allMonsters, 100000) // 缓存最近100000个状态
+
+	// 预计算宝物-区域映射
+	treasuresByArea := make(map[int][]int)
+	for idx, treasure := range allTreasures {
+		treasuresByArea[treasure.AreaID] = append(treasuresByArea[treasure.AreaID], idx)
+	}
+
+	// 计算可收集的宝物（优化版）
+	getCollectibleTreasuresOptimized := func(accessibleAreas map[int]bool, collectedTreasures *ExtendedBitSet) []int {
+		collectible := []int{}
+		for areaID := range accessibleAreas {
+			if treasures, exists := treasuresByArea[areaID]; exists {
+				for _, treasureIdx := range treasures {
+					if !hasBitExt(collectedTreasures, treasureIdx) {
+						collectible = append(collectible, treasureIdx)
+					}
+				}
+			}
+		}
+		return collectible
+	}
+
+	// DP表
+	dp := make(map[string]*State)
+
+	// 初始状态
+	initialDefeated := NewExtendedBitSet(globalMonsterCount)
+	initialCollected := NewExtendedBitSet(globalTreasureCount)
+	initialAccessible := accessCache.GetAccessibleAreas(initialDefeated, startArea)
+	initialCollectible := getCollectibleTreasuresOptimized(initialAccessible, initialCollected)
+
+	initialMDEF := uint8(0)
+	newHP, newMDEF, newATK, newDEF, newYellowKeys, newBlueKeys := applyTreasures(allTreasures, initialHP, initialMDEF, initialATK, initialDEF, initialYellowKeys, initialBlueKeys, initialCollectible)
+	newInitialCollected := initialCollected.Copy()
+	for _, idx := range initialCollectible {
+		newInitialCollected.Set(idx)
+	}
+
+	initialStateKey := encodeStateKey(initialDefeated, newYellowKeys, newBlueKeys, startHero.Money)
+
+	dp[initialStateKey] = &State{
+		HP:                 newHP,
+		ATK:                newATK,
+		DEF:                newDEF,
+		MDEF:               newMDEF,
+		Money:              startHero.Money,
+		YellowKeys:         newYellowKeys,
+		BlueKeys:           newBlueKeys,
+		DefeatedMonsters:   initialDefeated,
+		CollectedTreasures: newInitialCollected,
+		PrevKey:            "",
+		Action:             [2]int16{0, 0},
+		ConsecutiveFights:  0,
+		FightsSinceStart:   0,
+	}
+
+	// BFS搜索（分阶段：第一阶段只扩展状态，第二阶段统一选最优解）
+	queue := []string{initialStateKey}
+	visited := make(map[string]bool)
+	visited[initialStateKey] = true
+
+	var candidateKeys []string // 阶段一收集所有满足终点条件的状态key
+	var iterations int64
+	var prunedCount int64 // 统计剪枝次数
+
+	for len(queue) > 0 && iterations < maxIterations {
+		iterations++
+		stateKey := queue[0]
+		queue = queue[1:]
+		state, exists := dp[stateKey]
+
+		if !exists {
+			continue
+		}
+
+		// 使用缓存获取可达区域
+		accessibleAreas := accessCache.GetAccessibleAreas(state.DefeatedMonsters, startArea)
+
+		// 剪枝检查
+		if shouldPrune(state, requiredATK, requiredDEF, allMonsters, accessibleAreas) {
+			prunedCount++
+			continue
+		}
+
+		// 阶段一：只收集满足终点条件的状态，不直接更新最优解
+		if accessibleAreas[endArea] && state.ATK >= requiredATK && state.DEF >= requiredDEF &&
+			state.YellowKeys >= requiredYellowKeys && state.BlueKeys >= requiredBlueKeys && state.MDEF >= requiredMDEF {
+			candidateKeys = append(candidateKeys, stateKey)
+		}
+
+		// 尝试击败怪物
+		for monsterIdx, monster := range allMonsters {
+			if hasBitExt(state.DefeatedMonsters, monsterIdx) {
+				continue
+			}
+
+			// 检查怪物是否可达
+			canReachMonster := false
+			for _, areaID := range monster.ConnectedAreas {
+				if accessibleAreas[areaID] {
+					canReachMonster = true
+					break
+				}
+			}
+
+			if !canReachMonster {
+				continue
+			}
+
+			// 检查钥匙需求
+			if monster.ID == YellowDoorID && state.YellowKeys <= 0 {
+				continue
+			}
+			if monster.ID == BlueDoorID && state.BlueKeys <= 0 {
+				continue
+			}
+
+			damage := getDamage(state.ATK, state.DEF, monster.ID)
+			if damage >= state.HP {
+				continue
+			}
+
+			newHP := state.HP - damage
+			newMoney := state.Money + monster.Monster.Money
+			newYellowKeys := state.YellowKeys
+			newBlueKeys := state.BlueKeys
+			newDefeated := setBitExt(state.DefeatedMonsters, monsterIdx)
+
+			// 消耗钥匙
+			if monster.ID == YellowDoorID {
+				newYellowKeys -= 1
+			}
+			if monster.ID == BlueDoorID {
+				newBlueKeys -= 1 // 确保蓝钥匙消耗
+			}
+
+			// 使用增量更新获取新的可达区域
+			newAccessible := accessCache.GetAccessibleAreasIncremental(
+				state.DefeatedMonsters, monsterIdx, startArea, accessibleAreas)
+
+			newCollectible := getCollectibleTreasuresOptimized(newAccessible, state.CollectedTreasures)
+
+			finalHP, finalMDEF, finalATK, finalDEF, finalYK, finalBK := applyTreasures(allTreasures, newHP, state.MDEF, state.ATK, state.DEF, newYellowKeys, newBlueKeys, newCollectible)
+			finalCollected := state.CollectedTreasures.Copy()
+			for _, idx := range newCollectible {
+				finalCollected.Set(idx)
+			}
+
+			// 计算新的剪枝状态
+			oldAtkDef := state.ATK + state.DEF
+			newAtkDef := finalATK + finalDEF
+			newConsecutiveFights := state.ConsecutiveFights
+			if newAtkDef > oldAtkDef {
+				newConsecutiveFights = 0 // 攻防提升，重置连续计数
+			} else {
+				newConsecutiveFights++ // 没有提升，增加连续计数
+			}
+
+			newStateKey := encodeStateKey(newDefeated, finalYK, finalBK, newMoney)
+
+			existingState, exists := dp[newStateKey]
+			if !exists || finalHP > existingState.HP || (finalHP == existingState.HP && newMoney > existingState.Money) {
+				dp[newStateKey] = &State{
+					HP:                 finalHP,
+					ATK:                finalATK,
+					DEF:                finalDEF,
+					MDEF:               finalMDEF,
+					Money:              newMoney,
+					YellowKeys:         finalYK,
+					BlueKeys:           finalBK,
+					DefeatedMonsters:   newDefeated,
+					CollectedTreasures: finalCollected,
+					PrevKey:            stateKey,
+					Action:             [2]int16{int16(damage), int16(monster.Pos[0]<<8 + monster.Pos[1])},
+					ConsecutiveFights:  newConsecutiveFights,
+					FightsSinceStart:   state.FightsSinceStart + 1,
+				}
+
+				if !visited[newStateKey] {
+					visited[newStateKey] = true
+					queue = append(queue, newStateKey)
+				}
+			}
+
+			// 击败怪物后检查是否可以购买属性
+			if newMoney >= 40 {
+				// 购买ATK
+				buyMoney := newMoney - 40
+				buyATK := finalATK + 1
+				buyStateKey := encodeStateKey(newDefeated, finalYK, finalBK, buyMoney)
+
+				existingBuyState, buyExists := dp[buyStateKey]
+				if !buyExists || finalHP > existingBuyState.HP {
+					dp[buyStateKey] = &State{
+						HP:                 finalHP,
+						ATK:                buyATK,
+						DEF:                finalDEF,
+						MDEF:               finalMDEF,
+						Money:              buyMoney,
+						YellowKeys:         finalYK,
+						BlueKeys:           finalBK,
+						DefeatedMonsters:   newDefeated,
+						CollectedTreasures: finalCollected,
+						PrevKey:            newStateKey,
+						Action:             [2]int16{-1, -1}, // 特殊标记：购买ATK
+						ConsecutiveFights:  0,                // 购买属性重置连续战斗计数
+						FightsSinceStart:   state.FightsSinceStart + 1,
+					}
+
+					if !visited[buyStateKey] {
+						visited[buyStateKey] = true
+						queue = append(queue, buyStateKey)
+					}
+				}
+
+				// 购买DEF
+				buyDEF := finalDEF + 1
+				buyStateKey2 := encodeStateKey(newDefeated, finalYK, finalBK, buyMoney)
+
+				existingBuyState2, buyExists2 := dp[buyStateKey2]
+				if !buyExists2 || finalHP > existingBuyState2.HP || (finalHP == existingBuyState2.HP && buyMoney > existingBuyState2.Money) {
+					dp[buyStateKey2] = &State{
+						HP:                 finalHP,
+						ATK:                finalATK,
+						DEF:                buyDEF,
+						MDEF:               finalMDEF,
+						Money:              buyMoney,
+						YellowKeys:         finalYK,
+						BlueKeys:           finalBK,
+						DefeatedMonsters:   newDefeated,
+						CollectedTreasures: finalCollected,
+						PrevKey:            newStateKey,
+						Action:             [2]int16{-2, -2}, // 特殊标记：购买DEF
+						ConsecutiveFights:  0,                // 购买属性重置连续战斗计数
+						FightsSinceStart:   state.FightsSinceStart + 1,
+					}
+
+					if !visited[buyStateKey2] {
+						visited[buyStateKey2] = true
+						queue = append(queue, buyStateKey2)
+					}
+				}
+			}
+		}
+	}
+
+	// 阶段二：统一在所有满足终点条件的状态中选取最优解
+	var bestResult *SearchResult
+	var bestKey string
+	for _, key := range candidateKeys {
+		state := dp[key]
+		if state == nil {
+			continue
+		}
+		if bestResult == nil || state.HP > bestResult.HP || (state.HP == bestResult.HP && state.Money > bestResult.Money) {
+			bestKey = key
+			bestResult = &SearchResult{
+				HP:             state.HP,
+				ATK:            state.ATK,
+				DEF:            state.DEF,
+				MDEF:           state.MDEF,
+				Money:          state.Money,
+				YellowKeys:     state.YellowKeys,
+				BlueKeys:       state.BlueKeys,
+				DefeatedCount:  state.DefeatedMonsters.Count(),
+				CollectedCount: state.CollectedTreasures.Count(),
+			}
+		}
+	}
+
+	if iterations >= maxIterations {
+		fmt.Println("max iterations reached")
+	}
+	if bestResult != nil {
+		bestResult.Path = reconstructPath(dp, bestKey)
+		return *bestResult
+	} else {
+		// 修复：找不到最优解时，不回溯路径，直接返回空路径
+		return SearchResult{
+			HP:   -1,
+			Path: []int16{},
+		}
+	}
+}

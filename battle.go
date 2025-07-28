@@ -39,7 +39,7 @@ func shouldPrune(state *State, requiredATK, requiredDEF int8, allMonsters []*Glo
 	currentAtkDef := state.ATK + state.DEF
 	atkDefImprovement := currentAtkDef - initialAtk - initialDef
 	// 剪枝策略1: 如果打了5只怪之后攻防和比初始攻防和只高2点或更少，则停止扩展该路线
-	if state.FightsSinceStart >= 6 {
+	if state.FightsSinceStart >= 7 {
 		if atkDefImprovement <= 2 {
 			return true
 		}
@@ -53,21 +53,21 @@ func shouldPrune(state *State, requiredATK, requiredDEF int8, allMonsters []*Glo
 	}
 
 	// 剪枝策略1: 如果打了10只怪之后攻防和比初始攻防和只高5点或更少，则停止扩展该路线
-	if state.FightsSinceStart >= 10 {
+	if state.FightsSinceStart >= 11 {
 		if atkDefImprovement <= 4 {
 			return true
 		}
 	}
 
 	// 剪枝策略1: 如果打了10只怪之后攻防和比初始攻防和只高5点或更少，则停止扩展该路线
-	if state.FightsSinceStart >= 15 {
+	if state.FightsSinceStart >= 16 {
 		if atkDefImprovement <= 7 {
 			return true
 		}
 	}
 
 	// 剪枝策略1: 如果打了10只怪之后攻防和比初始攻防和只高5点或更少，则停止扩展该路线
-	if state.FightsSinceStart >= 20 {
+	if state.FightsSinceStart >= 21 {
 		if atkDefImprovement <= 9 {
 			return true
 		}

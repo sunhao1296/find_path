@@ -1,79 +1,82 @@
 package main
 
 import (
+	"container/heap"
 	"fmt"
 	"sort"
 )
 
 type State struct {
-	HP         int16 // 2字节
-	ATK        int8  // 1字节
-	DEF        int8  // 1字节
-	YellowKeys int8  // 1字节
-	BlueKeys   int8  // 1字节 - 新增蓝钥匙
+	Money             uint8
+	ATK               int8  // 1字节
+	DEF               int8  // 1字节
+	MDEF              uint8 // 1字节 - 新增魔法防御
+	YellowKeys        int8  // 1字节
+	BlueKeys          int8  // 1字节 - 新增蓝钥匙
+	ConsecutiveFights int8  // 连续战斗次数（未提升攻防时）
+	FightsSinceStart  int8  // 从开始到现在的战斗次数
+
+	HP     int16    // 2字节
+	Action [2]int16 // 新增：当前动作 [damage, pos编码]
 	// 剪枝相关字段
-	ConsecutiveFights int8 // 连续战斗次数（未提升攻防时）
-	FightsSinceStart  int8 // 从开始到现在的战斗次数
 
-	Action             [2]int16 // 新增：当前动作 [damage, pos编码]
-	DefeatedMonsters   int64    // 8字节
-	CollectedTreasures int64    // 8字节
-	PrevKey            int64    // 新增：前驱状态的key
+	DefeatedMonsters   int64 // 8字节
+	CollectedTreasures int64 // 8字节
+	PrevKey            int64 // 新增：前驱状态的key
 }
 
-type SearchResult struct {
-	HP             int16
-	ATK            int8
-	DEF            int8
-	YellowKeys     int8
-	BlueKeys       int8    // 新增蓝钥匙
-	Path           []int16 // 存储每次战斗损失的血量
-	DefeatedCount  int
-	CollectedCount int
+// 优先队列中的状态项
+type StateItem struct {
+	Key      int64
+	Priority int64 // 优先级：越大越优先（血量*1000000 + 金币*1000 - 战斗次数）
+	Index    int   // 在堆中的索引
 }
 
-// 输出路径函数（回溯 reconstruct）
-func printPath(path []int16) {
-	fmt.Printf("\n路径步骤:\n")
-	if len(path) == 0 {
-		fmt.Println("无战斗记录")
-		return
-	}
-	for i := 0; i < len(path); i += 2 {
-		damage := path[i]
-		pos := path[i+1]
-		fmt.Printf("%d. 战斗损失%d血, 战斗at %d, %d\n", i/2+1, damage, pos>>8, pos%(1<<8))
-	}
+// 优先队列实现
+type PriorityQueue []*StateItem
+
+func (pq PriorityQueue) Len() int { return len(pq) }
+
+func (pq PriorityQueue) Less(i, j int) bool {
+	// 最大堆：优先级高的在前
+	return pq[i].Priority > pq[j].Priority
 }
 
-type HeroItem struct {
-	AreaID     int
-	HP         int16
-	ATK        int8
-	DEF        int8
-	YellowKeys int8
-	BlueKeys   int8
+func (pq PriorityQueue) Swap(i, j int) {
+	pq[i], pq[j] = pq[j], pq[i]
+	pq[i].Index = i
+	pq[j].Index = j
 }
 
-// reconstructPath: 回溯生成完整路径
-func reconstructPath(dp map[int64]*State, endKey int64) []int16 {
-	path := []int16{}
-	for key := endKey; key != 0; {
-		state := dp[key]
-		if state == nil || (state.PrevKey == 0 && (state.Action[0] == 0 && state.Action[1] == 0)) {
-			break
-		}
-		path = append([]int16{state.Action[0], state.Action[1]}, path...)
-		key = state.PrevKey
-	}
-	return path
+func (pq *PriorityQueue) Push(x interface{}) {
+	n := len(*pq)
+	item := x.(*StateItem)
+	item.Index = n
+	*pq = append(*pq, item)
 }
 
-// 优化后的主函数
+func (pq *PriorityQueue) Pop() interface{} {
+	old := *pq
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = nil
+	item.Index = -1
+	*pq = old[0 : n-1]
+	return item
+}
+
+// 计算状态优先级
+func calculatePriority(hp int16, money uint8, fightsSinceStart int8) int64 {
+	// 优先级 = 血量*1000000 + 金币*1000 - 战斗次数
+	// 这样可以优先选择血量高、金币多、战斗次数少的状态
+	return int64(hp)*1000000 + int64(money)*1000 - int64(fightsSinceStart)
+}
+
+// 优化后的主函数 - 使用优先队列
 func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResult {
 	// 获取所有怪物和宝物
 	initialHP, initialATK, initialDEF, initialYellowKeys, initialBlueKeys, startArea := startHero.HP, startHero.ATK, startHero.DEF, startHero.YellowKeys, startHero.BlueKeys, startHero.AreaID
-	requiredATK, requiredDEF, requiredYellowKeys, requiredBlueKeys, endArea := requiredHero.ATK, requiredHero.DEF, requiredHero.YellowKeys, requiredHero.BlueKeys, requiredHero.AreaID
+	requiredATK, requiredDEF, requiredMDEF, requiredYellowKeys, requiredBlueKeys, endArea := requiredHero.ATK, requiredHero.DEF, requiredHero.MDEF, requiredHero.YellowKeys, requiredHero.BlueKeys, requiredHero.AreaID
 	allMonsters := []*GlobalMonster{}
 	allTreasures := []*GlobalTreasure{}
 
@@ -108,7 +111,7 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 	})
 
 	// 初始化缓存系统
-	accessCache := NewAccessibilityCache(allMonsters, 100000) // 缓存最近100000个状态
+	accessCache := NewAccessibilityCache(allMonsters, 100000)
 
 	// 预计算宝物-区域映射
 	treasuresByArea := make(map[int][]int)
@@ -131,43 +134,60 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 		return collectible
 	}
 
-	// 应用宝物效果（更新支持蓝钥匙）
-	applyTreasures := func(hp int16, atk, def, yellowKey, blueKey int8, treasureIndices []int) (int16, int8, int8, int8, int8) {
-		newHP, newATK, newDEF, newYellowKeys, newBlueKeys := hp, atk, def, yellowKey, blueKey
+	// 应用宝物效果
+	applyTreasures := func(hp int16, mdef uint8, atk, def, yellowKey, blueKey int8, treasureIndices []int) (int16, uint8, int8, int8, int8, int8) {
+		newHP, newATK, newDEF, newMDEF, newYellowKeys, newBlueKeys := hp, atk, def, mdef, yellowKey, blueKey
 		for _, idx := range treasureIndices {
 			treasure := allTreasures[idx]
-			if treasure.Type == treasureHP {
-				newHP += int16(treasure.Value)
-			} else if treasure.Type == treasureATK {
-				newATK += treasure.Value
-			} else if treasure.Type == treasureDEF {
+			switch treasure.Type {
+			case treasureDEF:
 				newDEF += treasure.Value
-			} else if treasure.Type == treasureYellowKey {
+			case treasureATK:
+				newATK += treasure.Value
+			case treasureHP:
+				newHP += int16(treasure.Value)
+			case treasureYellowKey:
 				newYellowKeys += treasure.Value
-			} else if treasure.Type == treasureBlueKey {
+			case treasureBlueKey:
 				newBlueKeys += treasure.Value
+			case treasureMDEF:
+				newMDEF += uint8(treasure.Value)
 			}
 		}
-		return newHP, newATK, newDEF, newYellowKeys, newBlueKeys
+		return newHP, newMDEF, newATK, newDEF, newYellowKeys, newBlueKeys
 	}
 
-	// 状态编码（修改支持蓝钥匙）
-	// 位分配：低59位为怪物状态，第59-61位为黄钥匙(3位，支持0-7)，第62-63位为蓝钥匙(2位，支持0-3)
-	encodeState := func(defeatedMonsters int64, yellowKeys, blueKeys int8) int64 {
+	// 状态编码
+	encodeState := func(defeatedMonsters int64, yellowKeys, blueKeys int8, money uint8) int64 {
+		const (
+			yellowKeyBit = 49
+			blueKeyBit   = 52
+			moneyBit     = 54
+			maxYellowKey = 7
+			maxBlueKey   = 3
+			maxMoney     = 63
+		)
+
 		if yellowKeys > maxYellowKey {
-			_ = fmt.Errorf("黄钥匙数量超过最大限制，已调整为7")
+			yellowKeys = maxYellowKey
 		}
 		if blueKeys > maxBlueKey {
-			_ = fmt.Errorf("蓝钥匙数量超过最大限制，已调整为3")
+			blueKeys = maxBlueKey
+		}
+		if money > maxMoney {
+			money = maxMoney
 		}
 		if defeatedMonsters > (1<<yellowKeyBit)-1 {
 			_ = fmt.Errorf("已击杀怪物数量超过最大限制")
 		}
-		return (int64(blueKeys) << blueKeyBit) | (int64(yellowKeys) << yellowKeyBit) | defeatedMonsters
+		return (int64(money) << moneyBit) | (int64(blueKeys) << blueKeyBit) | (int64(yellowKeys) << yellowKeyBit) | defeatedMonsters
 	}
 
-	// DP表
+	// DP表和优先队列
 	dp := make(map[int64]*State)
+	pq := &PriorityQueue{}
+	heap.Init(pq)
+	inQueue := make(map[int64]bool) // 跟踪哪些状态在队列中
 
 	// 初始状态
 	var initialDefeated int64 = 0
@@ -175,18 +195,21 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 	initialAccessible := accessCache.GetAccessibleAreas(initialDefeated, startArea)
 	initialCollectible := getCollectibleTreasuresOptimized(initialAccessible, initialCollected)
 
-	newHP, newATK, newDEF, newYellowKeys, newBlueKeys := applyTreasures(initialHP, initialATK, initialDEF, initialYellowKeys, initialBlueKeys, initialCollectible)
+	initialMDEF := uint8(0)
+	newHP, newMDEF, newATK, newDEF, newYellowKeys, newBlueKeys := applyTreasures(initialHP, initialMDEF, initialATK, initialDEF, initialYellowKeys, initialBlueKeys, initialCollectible)
 	newInitialCollected := initialCollected
 	for _, idx := range initialCollectible {
 		newInitialCollected = setBit(newInitialCollected, idx)
 	}
 
-	initialStateKey := encodeState(initialDefeated, newYellowKeys, newBlueKeys)
+	initialStateKey := encodeState(initialDefeated, newYellowKeys, newBlueKeys, startHero.Money)
 
-	dp[initialStateKey] = &State{
+	initialState := &State{
 		HP:                 newHP,
 		ATK:                newATK,
 		DEF:                newDEF,
+		MDEF:               newMDEF,
+		Money:              startHero.Money,
 		YellowKeys:         newYellowKeys,
 		BlueKeys:           newBlueKeys,
 		DefeatedMonsters:   initialDefeated,
@@ -197,21 +220,27 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 		FightsSinceStart:   0,
 	}
 
-	// BFS搜索（分阶段：第一阶段只扩展状态，第二阶段统一选最优解）
-	queue := []int64{initialStateKey}
-	visited := make(map[int64]bool)
-	visited[initialStateKey] = true
+	dp[initialStateKey] = initialState
+	priority := calculatePriority(newHP, startHero.Money, 0)
+	heap.Push(pq, &StateItem{Key: initialStateKey, Priority: priority})
+	inQueue[initialStateKey] = true
 
-	var candidateKeys []int64 // 阶段一收集所有满足终点条件的状态key
+	// 最优解跟踪
+	var bestResult *SearchResult
+	var bestKey int64
 	var iterations int64
-	var prunedCount int64 // 统计剪枝次数
+	var prunedCount int64
 
-	for len(queue) > 0 && iterations < maxIterations {
+	// 优先队列搜索（Dijkstra算法变种）
+	for pq.Len() > 0 && iterations < maxIterations {
 		iterations++
-		stateKey := queue[0]
-		queue = queue[1:]
-		state, exists := dp[stateKey]
 
+		// 取出优先级最高的状态
+		item := heap.Pop(pq).(*StateItem)
+		stateKey := item.Key
+		delete(inQueue, stateKey)
+
+		state, exists := dp[stateKey]
 		if !exists {
 			continue
 		}
@@ -225,10 +254,31 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 			continue
 		}
 
-		// 阶段一：只收集满足终点条件的状态，不直接更新最优解
+		// 检查是否到达终点
 		if accessibleAreas[endArea] && state.ATK >= requiredATK && state.DEF >= requiredDEF &&
-			state.YellowKeys >= requiredYellowKeys && state.BlueKeys >= requiredBlueKeys {
-			candidateKeys = append(candidateKeys, stateKey)
+			state.YellowKeys >= requiredYellowKeys && state.BlueKeys >= requiredBlueKeys && state.MDEF >= requiredMDEF {
+
+			// 更新最优解
+			if bestResult == nil || state.HP > bestResult.HP ||
+				(state.HP == bestResult.HP && state.Money > bestResult.Money) {
+
+				bestKey = stateKey
+				bestResult = &SearchResult{
+					HP:             state.HP,
+					ATK:            state.ATK,
+					DEF:            state.DEF,
+					MDEF:           state.MDEF,
+					Money:          state.Money,
+					YellowKeys:     state.YellowKeys,
+					BlueKeys:       state.BlueKeys,
+					DefeatedCount:  countBits(state.DefeatedMonsters),
+					CollectedCount: countBits(state.CollectedTreasures),
+				}
+			}
+
+			// 找到一个解后可以继续搜索更优解，或者直接返回
+			// 如果想要绝对最优解，继续搜索；如果想要第一个可行解，可以break
+			continue
 		}
 
 		// 尝试击败怪物
@@ -264,6 +314,7 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 			}
 
 			newHP := state.HP - damage
+			newMoney := state.Money + monster.Monster.Money
 			newYellowKeys := state.YellowKeys
 			newBlueKeys := state.BlueKeys
 			newDefeated := setBit(state.DefeatedMonsters, monsterIdx)
@@ -273,7 +324,7 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 				newYellowKeys -= 1
 			}
 			if monster.ID == BlueDoorID {
-				newBlueKeys -= 1 // 确保蓝钥匙消耗
+				newBlueKeys -= 1
 			}
 
 			// 使用增量更新获取新的可达区域
@@ -282,7 +333,7 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 
 			newCollectible := getCollectibleTreasuresOptimized(newAccessible, state.CollectedTreasures)
 
-			finalHP, finalATK, finalDEF, finalYK, finalBK := applyTreasures(newHP, state.ATK, state.DEF, newYellowKeys, newBlueKeys, newCollectible)
+			finalHP, finalMDEF, finalATK, finalDEF, finalYK, finalBK := applyTreasures(newHP, state.MDEF, state.ATK, state.DEF, newYellowKeys, newBlueKeys, newCollectible)
 			finalCollected := state.CollectedTreasures
 			for _, idx := range newCollectible {
 				finalCollected = setBit(finalCollected, idx)
@@ -293,19 +344,33 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 			newAtkDef := finalATK + finalDEF
 			newConsecutiveFights := state.ConsecutiveFights
 			if newAtkDef > oldAtkDef {
-				newConsecutiveFights = 0 // 攻防提升，重置连续计数
+				newConsecutiveFights = 0
 			} else {
-				newConsecutiveFights++ // 没有提升，增加连续计数
+				newConsecutiveFights++
 			}
 
-			newStateKey := encodeState(newDefeated, finalYK, finalBK)
+			newStateKey := encodeState(newDefeated, finalYK, finalBK, newMoney)
 
+			// 检查是否需要更新状态
 			existingState, exists := dp[newStateKey]
-			if !exists || finalHP > existingState.HP {
-				dp[newStateKey] = &State{
+			shouldUpdate := false
+
+			if !exists {
+				shouldUpdate = true
+			} else {
+				// 比较状态优劣：优先血量，其次金币，最后战斗次数
+				newPriority := calculatePriority(finalHP, newMoney, state.FightsSinceStart+1)
+				oldPriority := calculatePriority(existingState.HP, existingState.Money, existingState.FightsSinceStart)
+				shouldUpdate = newPriority > oldPriority
+			}
+
+			if shouldUpdate {
+				newState := &State{
 					HP:                 finalHP,
 					ATK:                finalATK,
 					DEF:                finalDEF,
+					MDEF:               finalMDEF,
+					Money:              newMoney,
 					YellowKeys:         finalYK,
 					BlueKeys:           finalBK,
 					DefeatedMonsters:   newDefeated,
@@ -316,32 +381,107 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 					FightsSinceStart:   state.FightsSinceStart + 1,
 				}
 
-				if !visited[newStateKey] {
-					visited[newStateKey] = true
-					queue = append(queue, newStateKey)
+				dp[newStateKey] = newState
+
+				// 加入优先队列（如果不在队列中）
+				if !inQueue[newStateKey] {
+					priority := calculatePriority(finalHP, newMoney, state.FightsSinceStart+1)
+					heap.Push(pq, &StateItem{Key: newStateKey, Priority: priority})
+					inQueue[newStateKey] = true
 				}
 			}
-		}
-	}
 
-	// 阶段二：统一在所有满足终点条件的状态中选取最优解
-	var bestResult *SearchResult
-	var bestKey int64
-	for _, key := range candidateKeys {
-		state := dp[key]
-		if state == nil {
-			continue
-		}
-		if bestResult == nil || state.HP > bestResult.HP {
-			bestKey = key
-			bestResult = &SearchResult{
-				HP:             state.HP,
-				ATK:            state.ATK,
-				DEF:            state.DEF,
-				YellowKeys:     state.YellowKeys,
-				BlueKeys:       state.BlueKeys,
-				DefeatedCount:  countBits(state.DefeatedMonsters),
-				CollectedCount: countBits(state.CollectedTreasures),
+			// 购买属性的逻辑
+			if newMoney >= 40 {
+				// 先处理购买ATK
+				buyMoneyATK := newMoney - 40
+				buyATK := finalATK + 1
+				buyStateKeyATK := encodeState(newDefeated, finalYK, finalBK, buyMoneyATK)
+
+				existingBuyStateATK, buyExistsATK := dp[buyStateKeyATK]
+				shouldUpdateBuyATK := false
+
+				if !buyExistsATK {
+					shouldUpdateBuyATK = true
+				} else {
+					// 关键：比较时要考虑ATK的差异
+					if finalHP > existingBuyStateATK.HP ||
+						(finalHP == existingBuyStateATK.HP && buyATK > existingBuyStateATK.ATK) ||
+						(finalHP == existingBuyStateATK.HP && buyATK == existingBuyStateATK.ATK && buyMoneyATK > existingBuyStateATK.Money) {
+						shouldUpdateBuyATK = true
+					}
+				}
+
+				if shouldUpdateBuyATK {
+					buyStateATK := &State{
+						HP:                 finalHP,
+						ATK:                buyATK,
+						DEF:                finalDEF,
+						MDEF:               finalMDEF,
+						Money:              buyMoneyATK,
+						YellowKeys:         finalYK,
+						BlueKeys:           finalBK,
+						DefeatedMonsters:   newDefeated,
+						CollectedTreasures: finalCollected,
+						PrevKey:            newStateKey,
+						Action:             [2]int16{-1, -1}, // 购买ATK
+						ConsecutiveFights:  0,
+						FightsSinceStart:   state.FightsSinceStart + 1,
+					}
+
+					dp[buyStateKeyATK] = buyStateATK
+
+					if !inQueue[buyStateKeyATK] {
+						buyPriorityATK := calculatePriority(finalHP, buyMoneyATK, state.FightsSinceStart+1)
+						heap.Push(pq, &StateItem{Key: buyStateKeyATK, Priority: buyPriorityATK})
+						inQueue[buyStateKeyATK] = true
+					}
+				}
+
+				// 再处理购买DEF
+				buyMoneyDEF := newMoney - 40
+				buyDEF := finalDEF + 1
+				buyStateKeyDEF := encodeState(newDefeated, finalYK, finalBK, buyMoneyDEF)
+
+				existingBuyStateDEF, buyExistsDEF := dp[buyStateKeyDEF]
+				shouldUpdateBuyDEF := false
+
+				if !buyExistsDEF {
+					shouldUpdateBuyDEF = true
+				} else {
+					// 关键：比较时要考虑DEF的差异
+					if finalHP > existingBuyStateDEF.HP ||
+						(finalHP == existingBuyStateDEF.HP && buyDEF > existingBuyStateDEF.DEF) ||
+						(finalHP == existingBuyStateDEF.HP && buyDEF == existingBuyStateDEF.DEF && buyMoneyDEF > existingBuyStateDEF.Money) {
+						shouldUpdateBuyDEF = true
+					}
+				}
+
+				if shouldUpdateBuyDEF {
+					buyStateDEF := &State{
+						HP:                 finalHP,
+						ATK:                finalATK,
+						DEF:                buyDEF,
+						MDEF:               finalMDEF,
+						Money:              buyMoneyDEF,
+						YellowKeys:         finalYK,
+						BlueKeys:           finalBK,
+						DefeatedMonsters:   newDefeated,
+						CollectedTreasures: finalCollected,
+						PrevKey:            newStateKey,
+						Action:             [2]int16{-2, -2}, // 购买DEF
+						ConsecutiveFights:  0,
+						FightsSinceStart:   state.FightsSinceStart + 1,
+					}
+
+					dp[buyStateKeyDEF] = buyStateDEF
+
+					if !inQueue[buyStateKeyDEF] {
+						buyPriorityDEF := calculatePriority(finalHP, buyMoneyDEF, state.FightsSinceStart+1)
+						heap.Push(pq, &StateItem{Key: buyStateKeyDEF, Priority: buyPriorityDEF})
+						inQueue[buyStateKeyDEF] = true
+					}
+				}
 			}
 		}
 	}
@@ -349,11 +489,11 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 	if iterations >= maxIterations {
 		fmt.Println("max iterations reached")
 	}
+
 	if bestResult != nil {
 		bestResult.Path = reconstructPath(dp, bestKey)
 		return *bestResult
 	} else {
-		// 修复：找不到最优解时，不回溯路径，直接返回空路径
 		return SearchResult{
 			HP:   -1,
 			Path: []int16{},

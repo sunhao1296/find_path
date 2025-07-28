@@ -7,6 +7,64 @@ import (
 	"time"
 )
 
+type HeroItem struct {
+	AreaID     int
+	HP         int16
+	ATK        int8
+	DEF        int8
+	MDEF       uint8
+	Money      uint8
+	YellowKeys int8
+	BlueKeys   int8
+}
+
+type SearchResult struct {
+	HP             int16
+	Money          uint8
+	ATK            int8
+	DEF            int8
+	MDEF           uint8
+	YellowKeys     int8
+	BlueKeys       int8    // 新增蓝钥匙
+	Path           []int16 // 存储每次战斗损失的血量
+	DefeatedCount  int
+	CollectedCount int
+}
+
+// 输出路径函数（回溯 reconstruct）
+func printPath(path []int16) {
+	fmt.Printf("\n路径步骤:\n")
+	if len(path) == 0 {
+		fmt.Println("无战斗记录")
+		return
+	}
+	for i := 0; i < len(path); i += 2 {
+		damage := path[i]
+		pos := path[i+1]
+		if damage == -1 && pos == -1 {
+			fmt.Printf("%d. 购买攻击力+1 (花费40金币)\n", i/2+1)
+		} else if damage == -2 && pos == -2 {
+			fmt.Printf("%d. 购买防御力+1 (花费40金币)\n", i/2+1)
+		} else {
+			fmt.Printf("%d. 战斗损失%d血, 战斗at %d, %d\n", i/2+1, damage, pos>>8, pos%(1<<8))
+		}
+	}
+}
+
+// reconstructPath: 回溯生成完整路径
+func reconstructPath(dp map[int64]*State, endKey int64) []int16 {
+	path := []int16{}
+	for key := endKey; key != 0; {
+		state := dp[key]
+		if state == nil || (state.PrevKey == 0 && (state.Action[0] == 0 && state.Action[1] == 0)) {
+			break
+		}
+		path = append([]int16{state.Action[0], state.Action[1]}, path...)
+		key = state.PrevKey
+	}
+	return path
+}
+
 func printStats() {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
@@ -84,7 +142,7 @@ func main() {
 		mu        sync.Mutex // 用于保护共享变量
 	)
 
-	poolSize := 5
+	poolSize := 4
 	taskCh := make(chan task, len(graph.BreakPoints))
 	resultCh := make(chan result, len(graph.BreakPoints))
 	var wg sync.WaitGroup
@@ -169,7 +227,7 @@ func main() {
 
 	if maxHP > 0 {
 		fmt.Printf("\n=== 找到最优解 ===\n")
-		fmt.Printf("最终属性: HP=%d", maxResult.HP)
+		fmt.Printf("最终属性: HP=%d, Money=%d", maxResult.HP, maxResult.Money)
 		fmt.Printf("破点：%v", bestPoint)
 		printPath(maxResult.Path)
 	} else {
