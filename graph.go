@@ -244,6 +244,132 @@ func (c *MapToGraphConverter) buildMonsterConnections(visited [][]int) map[strin
 	return monsterConnections
 }
 
+// 修改MapToGraphConverter的Convert方法，添加中心飞缓存构建
+func (c *MapToGraphConverter) Convert() *Graph {
+	visited := make([][]int, c.rows)
+	for i := range visited {
+		visited[i] = make([]int, c.cols)
+		for j := range visited[i] {
+			visited[i][j] = -1
+		}
+	}
+
+	areaCount := 0
+	startArea := -1
+	endArea := -1
+
+	// 第一遍遍历：处理所有位置
+	for i := 0; i < c.rows; i++ {
+		for j := 0; j < c.cols; j++ {
+			cellValue := c.gameMap[i][j]
+
+			// 跳过墙和已访问位置
+			if visited[i][j] != -1 || cellValue == 1 {
+				continue
+			}
+
+			// 关键修改：特殊处理怪物位置
+			if _, exists := c.monsterMap[cellValue]; exists {
+				// 怪物位置：检查连通性并处理相邻区域
+				c.processMonsterPosition(i, j, visited, &areaCount, &startArea, &endArea)
+				continue
+			}
+
+			// 处理普通区域（空地、宝物等）
+			areaID := areaCount
+			c.processCellAsNewArea(i, j, areaID, visited, &startArea, &endArea)
+			areaCount++
+		}
+	}
+
+	// 第二遍：构建最终的怪物连接信息
+	monsterConnections := c.buildMonsterConnections(visited)
+
+	// 收集破墙点
+	breakPointMap := make(map[string]*BreakPoint)
+
+	for i := 0; i < c.rows; i++ {
+		for j := 0; j < c.cols; j++ {
+			if c.gameMap[i][j] != 1 {
+				continue // 只考虑墙
+			}
+			neighborAreas := map[int]bool{}
+			for _, dir := range c.directions {
+				nx, ny := i+dir[0], j+dir[1]
+				if nx < 0 || nx >= c.rows || ny < 0 || ny >= c.cols {
+					continue
+				}
+				aid := visited[nx][ny]
+				if aid != -1 {
+					neighborAreas[aid] = true
+				}
+			}
+			if len(neighborAreas) >= 2 {
+				// 生成区域组合key用于去重
+				areaList := []int{}
+				for aid := range neighborAreas {
+					areaList = append(areaList, aid)
+				}
+				sort.Ints(areaList)
+				key := fmt.Sprintf("%v", areaList)
+				if _, exists := breakPointMap[key]; !exists {
+					breakPointMap[key] = &BreakPoint{
+						Pos:     [2]int{i, j},
+						AreaIDs: areaList,
+					}
+				}
+			}
+		}
+	}
+	breakPoints := []*BreakPoint{}
+	for _, bp := range breakPointMap {
+		breakPoints = append(breakPoints, bp)
+	}
+
+	// 验证转换结果
+	//c.validateConversion()
+
+	// 创建Graph
+	graph := &Graph{
+		Areas:              c.areas,
+		StartArea:          startArea,
+		EndArea:            endArea,
+		AreaMap:            visited,
+		MonsterConnections: monsterConnections,
+		BreakPoints:        breakPoints,
+	}
+
+	// 构建中心飞缓存
+	graph.buildCenterFlyCache(c.gameMap)
+	//ExampleCenterFlyUsage(graph)
+	return graph
+}
+
+// 验证转换结果
+func (c *MapToGraphConverter) validateConversion() {
+	totalTreasuresInMap := 0
+	for i := 0; i < c.rows; i++ {
+		for j := 0; j < c.cols; j++ {
+			if _, exists := c.treasureMap[c.gameMap[i][j]]; exists {
+				totalTreasuresInMap++
+			}
+		}
+	}
+
+	totalTreasuresInAreas := 0
+	for _, area := range c.areas {
+		totalTreasuresInAreas += len(area.Treasures)
+	}
+
+	fmt.Printf("地图中宝物总数: %d\n", totalTreasuresInMap)
+	fmt.Printf("总区域数: %d\n", len(c.areas))
+	fmt.Printf("怪物连接数: %d\n", len(c.monsterConnections))
+
+	if totalTreasuresInMap != totalTreasuresInAreas {
+		fmt.Printf("警告：有 %d 个宝物丢失！\n", totalTreasuresInMap-totalTreasuresInAreas)
+	}
+}
+
 // 构建中心飞查询缓存
 func (g *Graph) buildCenterFlyCache(gameMap [][]int) {
 	g.centerFlyCache = make(map[int]*CenterFlyResult)
@@ -349,154 +475,5 @@ func (g *Graph) PrintCenterFlyInfo() {
 			}
 			fmt.Println()
 		}
-	}
-}
-
-// 修改MapToGraphConverter的Convert方法，添加中心飞缓存构建
-func (c *MapToGraphConverter) Convert() *Graph {
-	visited := make([][]int, c.rows)
-	for i := range visited {
-		visited[i] = make([]int, c.cols)
-		for j := range visited[i] {
-			visited[i][j] = -1
-		}
-	}
-
-	areaCount := 0
-	startArea := -1
-	endArea := -1
-
-	// 第一遍遍历：处理所有位置
-	for i := 0; i < c.rows; i++ {
-		for j := 0; j < c.cols; j++ {
-			cellValue := c.gameMap[i][j]
-
-			// 跳过墙和已访问位置
-			if visited[i][j] != -1 || cellValue == 1 {
-				continue
-			}
-
-			// 关键修改：特殊处理怪物位置
-			if _, exists := c.monsterMap[cellValue]; exists {
-				// 怪物位置：检查连通性并处理相邻区域
-				c.processMonsterPosition(i, j, visited, &areaCount, &startArea, &endArea)
-				continue
-			}
-
-			// 处理普通区域（空地、宝物等）
-			areaID := areaCount
-			c.processCellAsNewArea(i, j, areaID, visited, &startArea, &endArea)
-			areaCount++
-		}
-	}
-
-	// 第二遍：构建最终的怪物连接信息
-	monsterConnections := c.buildMonsterConnections(visited)
-
-	// 收集破墙点
-	breakPointMap := make(map[string]*BreakPoint)
-
-	for i := 0; i < c.rows; i++ {
-		for j := 0; j < c.cols; j++ {
-			if c.gameMap[i][j] != 1 {
-				continue // 只考虑墙
-			}
-			neighborAreas := map[int]bool{}
-			for _, dir := range c.directions {
-				nx, ny := i+dir[0], j+dir[1]
-				if nx < 0 || nx >= c.rows || ny < 0 || ny >= c.cols {
-					continue
-				}
-				aid := visited[nx][ny]
-				if aid != -1 {
-					neighborAreas[aid] = true
-				}
-			}
-			if len(neighborAreas) >= 2 {
-				// 生成区域组合key用于去重
-				areaList := []int{}
-				for aid := range neighborAreas {
-					areaList = append(areaList, aid)
-				}
-				sort.Ints(areaList)
-				key := fmt.Sprintf("%v", areaList)
-				if _, exists := breakPointMap[key]; !exists {
-					breakPointMap[key] = &BreakPoint{
-						Pos:     [2]int{i, j},
-						AreaIDs: areaList,
-					}
-				}
-			}
-		}
-	}
-	breakPoints := []*BreakPoint{}
-	for _, bp := range breakPointMap {
-		breakPoints = append(breakPoints, bp)
-	}
-
-	// 验证转换结果
-	//c.validateConversion()
-
-	// 创建Graph
-	graph := &Graph{
-		Areas:              c.areas,
-		StartArea:          startArea,
-		EndArea:            endArea,
-		AreaMap:            visited,
-		MonsterConnections: monsterConnections,
-		BreakPoints:        breakPoints,
-	}
-
-	// 构建中心飞缓存
-	graph.buildCenterFlyCache(c.gameMap)
-	//ExampleCenterFlyUsage(graph)
-	return graph
-}
-
-// 使用示例
-func ExampleCenterFlyUsage(graph *Graph) {
-	// 查询区域0的所有中心飞目标
-	result := graph.GetCenterFlyTargets(0)
-	fmt.Printf("区域0可以中心飞到%d个目标区域\n", len(result.Targets))
-
-	// 检查是否可以从区域0飞到区域5
-	if graph.CanCenterFlyTo(0, 5) {
-		fmt.Println("可以从区域0中心飞到区域5")
-	}
-
-	// 获取区域0可达的所有区域
-	reachableAreas := graph.GetCenterFlyReachableAreas(0)
-	fmt.Printf("区域0可中心飞到的区域: %v\n", reachableAreas)
-
-	// 查找能飞到区域5的所有源区域
-	sourceAreas := graph.GetCenterFlySourceAreas(5)
-	fmt.Printf("可以中心飞到区域5的源区域: %v\n", sourceAreas)
-
-	// 打印所有中心飞信息
-	graph.PrintCenterFlyInfo()
-}
-
-// 验证转换结果
-func (c *MapToGraphConverter) validateConversion() {
-	totalTreasuresInMap := 0
-	for i := 0; i < c.rows; i++ {
-		for j := 0; j < c.cols; j++ {
-			if _, exists := c.treasureMap[c.gameMap[i][j]]; exists {
-				totalTreasuresInMap++
-			}
-		}
-	}
-
-	totalTreasuresInAreas := 0
-	for _, area := range c.areas {
-		totalTreasuresInAreas += len(area.Treasures)
-	}
-
-	fmt.Printf("地图中宝物总数: %d\n", totalTreasuresInMap)
-	fmt.Printf("总区域数: %d\n", len(c.areas))
-	fmt.Printf("怪物连接数: %d\n", len(c.monsterConnections))
-
-	if totalTreasuresInMap != totalTreasuresInAreas {
-		fmt.Printf("警告：有 %d 个宝物丢失！\n", totalTreasuresInMap-totalTreasuresInAreas)
 	}
 }

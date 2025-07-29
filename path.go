@@ -16,6 +16,10 @@ type State struct {
 	ConsecutiveFights int8  // 连续战斗次数（未提升攻防时）
 	FightsSinceStart  int8  // 从开始到现在的战斗次数
 
+	// 新增：购买次数跟踪
+	ATKBuys uint8 // 购买攻击的次数
+	DEFBuys uint8 // 购买防御的次数
+
 	HP     int16    // 2字节
 	Action [2]int16 // 新增：当前动作 [damage, pos编码]
 	// 剪枝相关字段
@@ -157,12 +161,14 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 		return newHP, newMDEF, newATK, newDEF, newYellowKeys, newBlueKeys
 	}
 
-	// 状态编码
-	encodeState := func(defeatedMonsters int64, yellowKeys, blueKeys int8, money uint8) int64 {
+	// 修改后的状态编码，包含购买次数信息
+	encodeState := func(defeatedMonsters int64, yellowKeys, blueKeys int8, money uint8, atkBuys, defBuys uint8) int64 {
 		const (
-			yellowKeyBit = 49
-			blueKeyBit   = 52
-			moneyBit     = 54
+			yellowKeyBit = 45 // 减少4位为购买次数让出空间
+			blueKeyBit   = 48
+			moneyBit     = 50
+			atkBuysBit   = 56 // 攻击购买次数位置（2位，最多3次）
+			defBuysBit   = 58 // 防御购买次数位置（2位，最多3次）
 			maxYellowKey = 7
 			maxBlueKey   = 3
 			maxMoney     = 63
@@ -177,10 +183,19 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 		if money > maxMoney {
 			money = maxMoney
 		}
+		if atkBuys > 3 {
+			atkBuys = 3
+		}
+		if defBuys > 3 {
+			defBuys = 3
+		}
 		if defeatedMonsters > (1<<yellowKeyBit)-1 {
 			_ = fmt.Errorf("已击杀怪物数量超过最大限制")
 		}
-		return (int64(money) << moneyBit) | (int64(blueKeys) << blueKeyBit) | (int64(yellowKeys) << yellowKeyBit) | defeatedMonsters
+
+		return (int64(defBuys) << defBuysBit) | (int64(atkBuys) << atkBuysBit) |
+			(int64(money) << moneyBit) | (int64(blueKeys) << blueKeyBit) |
+			(int64(yellowKeys) << yellowKeyBit) | defeatedMonsters
 	}
 
 	// DP表和优先队列
@@ -202,7 +217,7 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 		newInitialCollected = setBit(newInitialCollected, idx)
 	}
 
-	initialStateKey := encodeState(initialDefeated, newYellowKeys, newBlueKeys, startHero.Money)
+	initialStateKey := encodeState(initialDefeated, newYellowKeys, newBlueKeys, startHero.Money, 0, 0)
 
 	initialState := &State{
 		HP:                 newHP,
@@ -212,6 +227,8 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 		Money:              startHero.Money,
 		YellowKeys:         newYellowKeys,
 		BlueKeys:           newBlueKeys,
+		ATKBuys:            0,
+		DEFBuys:            0,
 		DefeatedMonsters:   initialDefeated,
 		CollectedTreasures: newInitialCollected,
 		PrevKey:            0,
@@ -345,11 +362,11 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 			newConsecutiveFights := state.ConsecutiveFights
 			if newAtkDef > oldAtkDef {
 				newConsecutiveFights = 0
-			} else {
+			} else if damage > 0 {
 				newConsecutiveFights++
 			}
 
-			newStateKey := encodeState(newDefeated, finalYK, finalBK, newMoney)
+			newStateKey := encodeState(newDefeated, finalYK, finalBK, newMoney, state.ATKBuys, state.DEFBuys)
 
 			// 检查是否需要更新状态
 			existingState, exists := dp[newStateKey]
@@ -373,6 +390,8 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 					Money:              newMoney,
 					YellowKeys:         finalYK,
 					BlueKeys:           finalBK,
+					ATKBuys:            state.ATKBuys,
+					DEFBuys:            state.DEFBuys,
 					DefeatedMonsters:   newDefeated,
 					CollectedTreasures: finalCollected,
 					PrevKey:            stateKey,
@@ -380,7 +399,9 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 					ConsecutiveFights:  newConsecutiveFights,
 					FightsSinceStart:   state.FightsSinceStart + 1,
 				}
-
+				if damage == 0 {
+					newState.FightsSinceStart = state.FightsSinceStart
+				}
 				dp[newStateKey] = newState
 
 				// 加入优先队列（如果不在队列中）
@@ -391,95 +412,99 @@ func findOptimalPath(graph *Graph, startHero, requiredHero *HeroItem) SearchResu
 				}
 			}
 
-			// 购买属性的逻辑
+			// 修改后的购买逻辑 - 同时考虑购买ATK和DEF
 			if newMoney >= 40 {
-				// 先处理购买ATK
-				buyMoneyATK := newMoney - 40
-				buyATK := finalATK + 1
-				buyStateKeyATK := encodeState(newDefeated, finalYK, finalBK, buyMoneyATK)
+				// 购买ATK
+				if state.ATKBuys < 3 { // 限制购买次数
+					buyMoneyATK := newMoney - 40
+					buyATK := finalATK + 1
+					newATKBuys := state.ATKBuys + 1
+					buyStateKeyATK := encodeState(newDefeated, finalYK, finalBK, buyMoneyATK, newATKBuys, state.DEFBuys)
 
-				existingBuyStateATK, buyExistsATK := dp[buyStateKeyATK]
-				shouldUpdateBuyATK := false
+					existingBuyStateATK, buyExistsATK := dp[buyStateKeyATK]
+					shouldUpdateBuyATK := false
 
-				if !buyExistsATK {
-					shouldUpdateBuyATK = true
-				} else {
-					// 关键：比较时要考虑ATK的差异
-					if finalHP > existingBuyStateATK.HP ||
-						(finalHP == existingBuyStateATK.HP && buyATK > existingBuyStateATK.ATK) ||
-						(finalHP == existingBuyStateATK.HP && buyATK == existingBuyStateATK.ATK && buyMoneyATK > existingBuyStateATK.Money) {
+					if !buyExistsATK {
 						shouldUpdateBuyATK = true
+					} else {
+						newPriorityATK := calculatePriority(finalHP, buyMoneyATK, state.FightsSinceStart+1)
+						oldPriorityATK := calculatePriority(existingBuyStateATK.HP, existingBuyStateATK.Money, existingBuyStateATK.FightsSinceStart)
+						shouldUpdateBuyATK = newPriorityATK > oldPriorityATK
+					}
+
+					if shouldUpdateBuyATK {
+						buyStateATK := &State{
+							HP:                 finalHP,
+							ATK:                buyATK,
+							DEF:                finalDEF,
+							MDEF:               finalMDEF,
+							Money:              buyMoneyATK,
+							YellowKeys:         finalYK,
+							BlueKeys:           finalBK,
+							ATKBuys:            newATKBuys,
+							DEFBuys:            state.DEFBuys,
+							DefeatedMonsters:   newDefeated,
+							CollectedTreasures: finalCollected,
+							PrevKey:            newStateKey,
+							Action:             [2]int16{-1, -1}, // 购买ATK
+							ConsecutiveFights:  0,
+							FightsSinceStart:   state.FightsSinceStart + 1,
+						}
+
+						dp[buyStateKeyATK] = buyStateATK
+
+						if !inQueue[buyStateKeyATK] {
+							buyPriorityATK := calculatePriority(finalHP, buyMoneyATK, state.FightsSinceStart+1)
+							heap.Push(pq, &StateItem{Key: buyStateKeyATK, Priority: buyPriorityATK})
+							inQueue[buyStateKeyATK] = true
+						}
 					}
 				}
 
-				if shouldUpdateBuyATK {
-					buyStateATK := &State{
-						HP:                 finalHP,
-						ATK:                buyATK,
-						DEF:                finalDEF,
-						MDEF:               finalMDEF,
-						Money:              buyMoneyATK,
-						YellowKeys:         finalYK,
-						BlueKeys:           finalBK,
-						DefeatedMonsters:   newDefeated,
-						CollectedTreasures: finalCollected,
-						PrevKey:            newStateKey,
-						Action:             [2]int16{-1, -1}, // 购买ATK
-						ConsecutiveFights:  0,
-						FightsSinceStart:   state.FightsSinceStart + 1,
-					}
+				// 购买DEF
+				if state.DEFBuys < 3 { // 限制购买次数
+					buyMoneyDEF := newMoney - 40
+					buyDEF := finalDEF + 1
+					newDEFBuys := state.DEFBuys + 1
+					buyStateKeyDEF := encodeState(newDefeated, finalYK, finalBK, buyMoneyDEF, state.ATKBuys, newDEFBuys)
 
-					dp[buyStateKeyATK] = buyStateATK
+					existingBuyStateDEF, buyExistsDEF := dp[buyStateKeyDEF]
+					shouldUpdateBuyDEF := false
 
-					if !inQueue[buyStateKeyATK] {
-						buyPriorityATK := calculatePriority(finalHP, buyMoneyATK, state.FightsSinceStart+1)
-						heap.Push(pq, &StateItem{Key: buyStateKeyATK, Priority: buyPriorityATK})
-						inQueue[buyStateKeyATK] = true
-					}
-				}
-
-				// 再处理购买DEF
-				buyMoneyDEF := newMoney - 40
-				buyDEF := finalDEF + 1
-				buyStateKeyDEF := encodeState(newDefeated, finalYK, finalBK, buyMoneyDEF)
-
-				existingBuyStateDEF, buyExistsDEF := dp[buyStateKeyDEF]
-				shouldUpdateBuyDEF := false
-
-				if !buyExistsDEF {
-					shouldUpdateBuyDEF = true
-				} else {
-					// 关键：比较时要考虑DEF的差异
-					if finalHP > existingBuyStateDEF.HP ||
-						(finalHP == existingBuyStateDEF.HP && buyDEF > existingBuyStateDEF.DEF) ||
-						(finalHP == existingBuyStateDEF.HP && buyDEF == existingBuyStateDEF.DEF && buyMoneyDEF > existingBuyStateDEF.Money) {
+					if !buyExistsDEF {
 						shouldUpdateBuyDEF = true
-					}
-				}
-
-				if shouldUpdateBuyDEF {
-					buyStateDEF := &State{
-						HP:                 finalHP,
-						ATK:                finalATK,
-						DEF:                buyDEF,
-						MDEF:               finalMDEF,
-						Money:              buyMoneyDEF,
-						YellowKeys:         finalYK,
-						BlueKeys:           finalBK,
-						DefeatedMonsters:   newDefeated,
-						CollectedTreasures: finalCollected,
-						PrevKey:            newStateKey,
-						Action:             [2]int16{-2, -2}, // 购买DEF
-						ConsecutiveFights:  0,
-						FightsSinceStart:   state.FightsSinceStart + 1,
+					} else {
+						newPriorityDEF := calculatePriority(finalHP, buyMoneyDEF, state.FightsSinceStart+1)
+						oldPriorityDEF := calculatePriority(existingBuyStateDEF.HP, existingBuyStateDEF.Money, existingBuyStateDEF.FightsSinceStart)
+						shouldUpdateBuyDEF = newPriorityDEF > oldPriorityDEF
 					}
 
-					dp[buyStateKeyDEF] = buyStateDEF
+					if shouldUpdateBuyDEF {
+						buyStateDEF := &State{
+							HP:                 finalHP,
+							ATK:                finalATK,
+							DEF:                buyDEF,
+							MDEF:               finalMDEF,
+							Money:              buyMoneyDEF,
+							YellowKeys:         finalYK,
+							BlueKeys:           finalBK,
+							ATKBuys:            state.ATKBuys,
+							DEFBuys:            newDEFBuys,
+							DefeatedMonsters:   newDefeated,
+							CollectedTreasures: finalCollected,
+							PrevKey:            newStateKey,
+							Action:             [2]int16{-2, -2}, // 购买DEF
+							ConsecutiveFights:  0,
+							FightsSinceStart:   state.FightsSinceStart + 1,
+						}
 
-					if !inQueue[buyStateKeyDEF] {
-						buyPriorityDEF := calculatePriority(finalHP, buyMoneyDEF, state.FightsSinceStart+1)
-						heap.Push(pq, &StateItem{Key: buyStateKeyDEF, Priority: buyPriorityDEF})
-						inQueue[buyStateKeyDEF] = true
+						dp[buyStateKeyDEF] = buyStateDEF
+
+						if !inQueue[buyStateKeyDEF] {
+							buyPriorityDEF := calculatePriority(finalHP, buyMoneyDEF, state.FightsSinceStart+1)
+							heap.Push(pq, &StateItem{Key: buyStateKeyDEF, Priority: buyPriorityDEF})
+							inQueue[buyStateKeyDEF] = true
+						}
 					}
 				}
 			}

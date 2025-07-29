@@ -113,7 +113,8 @@ func main() {
 
 	// 创建转换器并运行测试
 	converter := NewMapToGraphConverter(gameMap, treasureMap, monsterMap, start, end)
-	length := len(gameMap)
+	length := len(gameMap[0])
+	rows := len(gameMap)
 	for i, row := range gameMap {
 		fmt.Print("[")
 		for j, val := range row {
@@ -123,7 +124,7 @@ func main() {
 			}
 		}
 		fmt.Print("]")
-		if i < length-1 {
+		if i < rows-1 {
 			fmt.Println(",")
 		} else {
 			fmt.Println()
@@ -142,7 +143,7 @@ func main() {
 		mu        sync.Mutex // 用于保护共享变量
 	)
 
-	poolSize := 4
+	poolSize := 6
 	taskCh := make(chan task, len(graph.BreakPoints))
 	resultCh := make(chan result, len(graph.BreakPoints))
 	var wg sync.WaitGroup
@@ -154,7 +155,7 @@ func main() {
 			defer wg.Done()
 			for t := range taskCh {
 				x, y := t.point[0], t.point[1]
-
+				fmt.Printf("Task at point %v, x: %v, y: %v\n", t.point[0], x, y)
 				// 深拷贝 gameMap
 				newGameMap := make([][]int, len(gameMap))
 				for i := range gameMap {
@@ -184,6 +185,7 @@ func main() {
 				})
 
 				// 发送结果
+				fmt.Printf("point: %v, hp: %v\n", t.point, res.HP)
 				resultCh <- result{
 					hp:         res.HP,
 					heroResult: res,

@@ -38,17 +38,35 @@ func getDamage(playerATK, playerDEF int8, monsterID int) int16 {
 func shouldPrune(state *State, requiredATK, requiredDEF int8, allMonsters []*GlobalMonster, accessibleAreas map[int]bool) bool {
 	currentAtkDef := state.ATK + state.DEF
 	atkDefImprovement := currentAtkDef - initialAtk - initialDef
-	// 剪枝策略1: 如果打了5只怪之后攻防和比初始攻防和只高2点或更少，则停止扩展该路线
+
+	// 剪枝策略1
+	if state.FightsSinceStart >= 4 {
+		if atkDefImprovement == 0 {
+			return true
+		}
+	}
+
+	// 剪枝策略1
+	if state.FightsSinceStart >= 6 {
+		if atkDefImprovement <= 1 {
+			return true
+		}
+	}
+
+	// 剪枝策略2
 	if state.FightsSinceStart >= 7 {
 		if atkDefImprovement <= 2 {
 			return true
 		}
 	}
 
-	// 剪枝策略2: 如果一条路线连续打5只怪都没有提升攻防和，且攻防还没有达到required攻防，则停止扩展该路线
+	if state.Money > 45 {
+		return true
+	}
+
+	// 剪枝策略3
 	// 注意：只计算非零伤害的怪物
-	nonZeroDamageFights := countNonZeroDamageFights(state, allMonsters)
-	if nonZeroDamageFights >= 5 && (state.ATK < requiredATK-1 || state.DEF < requiredDEF-1) && (state.HP < 100) {
+	if state.ConsecutiveFights >= 5 && (state.ATK < requiredATK-2 || state.DEF < requiredDEF-2) {
 		return true
 	}
 
@@ -73,13 +91,12 @@ func shouldPrune(state *State, requiredATK, requiredDEF int8, allMonsters []*Glo
 		}
 	}
 
-	return false
-}
+	// 剪枝策略1: 如果打了10只怪之后攻防和比初始攻防和只高5点或更少，则停止扩展该路线
+	if state.FightsSinceStart >= 27 {
+		if atkDefImprovement <= 12 {
+			return true
+		}
+	}
 
-// 计算非零伤害的连续战斗次数
-func countNonZeroDamageFights(state *State, allMonsters []*GlobalMonster) int8 {
-	// 这里需要回溯路径来统计，简化实现：如果连续战斗中大部分是零伤害，则调整计数
-	// 实际实现中可以在State中添加专门的NonZeroDamageFights字段来精确追踪
-	nonZeroRatio := 0.7 // 假设70%的战斗是有伤害的
-	return int8(float64(state.ConsecutiveFights) * nonZeroRatio)
+	return false
 }
